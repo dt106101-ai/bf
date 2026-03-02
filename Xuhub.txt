@@ -1,0 +1,6222 @@
+        -- ===== 基本服務 =====
+        local Players = game:GetService("Players")
+        local ReplicatedStorage = game:GetService("ReplicatedStorage")
+        local TweenService = game:GetService("TweenService")
+        local UserInputService = game:GetService("UserInputService")
+        local RunService = game:GetService("RunService")
+        local Workspace = game:GetService("Workspace")
+
+        local player = Players.LocalPlayer
+        local PlayerGui = player:WaitForChild("PlayerGui")
+
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+local currentPlaceId = game.PlaceId
+local World1 = currentPlaceId == 2753915549 or currentPlaceId == 85211729168715
+local World2 = currentPlaceId == 4442272183 or currentPlaceId == 79091703265657
+local World3 = currentPlaceId == 7449423635 or currentPlaceId == 100117331123089
+
+        -- ===== 核心 =====
+        _G.FastAttack = true
+        local Settings = {
+            AutoClick = true,
+            Distance = 50,
+            AttackInterval = 0.01,
+            MaxTargets = 20,
+            
+        }
+
+        local function IsAlive(char)
+            local hum = char:FindFirstChild("Humanoid")
+            return hum and hum.Health > 0
+        end
+        -- ===== FastAttack 核心 =====
+        local Net = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Net")
+        local RegisterAttack = Net:WaitForChild("RE/RegisterAttack")
+        local RegisterHit = Net:WaitForChild("RE/RegisterHit")
+        local EnemiesFolder = workspace:WaitForChild("Enemies")
+        local CharactersFolder = workspace:WaitForChild("Characters")
+
+-- ================= 核心參數 =================
+local SLIDE_MAGNITUDE = 200
+local ACCELERATION = 12
+local DECELERATION = 18
+local MAX_SPEED = 1000
+
+local moving = false
+local moveConn
+local moveKeys = {W=false, A=false, S=false, D=false}
+local currentVelocity = Vector3.zero
+local wasMoving = false -- 原本滑動狀態
+local slideLocked = false -- 上船鎖定滑動
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local character, root, humanoid
+
+-- ================= 核心函數 =================
+local function setupCharacter(char)
+    character = char
+    root = char:WaitForChild("HumanoidRootPart")
+    humanoid = char:WaitForChild("Humanoid")
+end
+setupCharacter(player.Character or player.CharacterAdded:Wait())
+player.CharacterAdded:Connect(setupCharacter)
+
+-- ================= WASD 控制 =================
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.W then moveKeys.W = true end
+    if input.KeyCode == Enum.KeyCode.A then moveKeys.A = true end
+    if input.KeyCode == Enum.KeyCode.S then moveKeys.S = true end
+    if input.KeyCode == Enum.KeyCode.D then moveKeys.D = true end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.W then moveKeys.W = false end
+    if input.KeyCode == Enum.KeyCode.A then moveKeys.A = false end
+    if input.KeyCode == Enum.KeyCode.S then moveKeys.S = false end
+    if input.KeyCode == Enum.KeyCode.D then moveKeys.D = false end
+end)
+
+-- ================= 移動核心 =================
+local function startMove()
+    if moving or not root or slideLocked then return end -- 鎖定時不啟動
+    moving = true
+    wasMoving = true
+
+    moveConn = RunService.RenderStepped:Connect(function(dt)
+        if not root or ACTIVE_SEAT then return end -- 坐船時不動
+        if slideLocked then return end -- 安全保護
+
+        local cam = Workspace.CurrentCamera
+        local look = Vector3.new(cam.CFrame.LookVector.X,0,cam.CFrame.LookVector.Z)
+        local right = Vector3.new(cam.CFrame.RightVector.X,0,cam.CFrame.RightVector.Z)
+
+        local dir = Vector3.zero
+        if moveKeys.W then dir += look end
+        if moveKeys.S then dir -= look end
+        if moveKeys.A then dir -= right end
+        if moveKeys.D then dir += right end
+        if dir.Magnitude > 0 then dir = dir.Unit end
+
+        local targetVelocity = dir * SLIDE_MAGNITUDE
+        local lerpSpeed = dir.Magnitude > 0 and ACCELERATION or DECELERATION
+        currentVelocity = currentVelocity:Lerp(targetVelocity, math.clamp(lerpSpeed*dt,0,1))
+
+        root.CFrame += Vector3.new(currentVelocity.X,0,currentVelocity.Z) * dt
+    end)
+end
+
+local function stopMove()
+    moving = false
+    if moveConn then
+        moveConn:Disconnect()
+        moveConn = nil
+    end
+end
+
+local function toggleMove(state)
+    if slideLocked and state then return end -- 鎖定時不能開啟
+    if state then
+        startMove()
+    else
+        stopMove()
+        wasMoving = false
+        currentVelocity = Vector3.zero
+    end
+end
+
+-- ================= 船速系統 =================
+local BoatSpeedSettings = {
+    Enabled = false,
+    Speed = 200,
+    MaxSpeed = 500
+}
+local ACTIVE_SEAT = nil
+local ORIGINAL_SEAT_SPEED = nil
+
+local function updateBoatSpeed()
+    if not ACTIVE_SEAT then return end
+    if BoatSpeedSettings.Enabled then
+        ACTIVE_SEAT.MaxSpeed = BoatSpeedSettings.Speed
+    elseif ORIGINAL_SEAT_SPEED then
+        ACTIVE_SEAT.MaxSpeed = ORIGINAL_SEAT_SPEED
+    end
+end
+
+-- ================= 船座監聽 =================
+local function onCharacter(char)
+    local hum = char:WaitForChild("Humanoid")
+
+    hum.Seated:Connect(function(sitting, seat)
+        if seat and seat:IsA("VehicleSeat") and sitting then
+            -- 上船：鎖定滑動
+            slideLocked = true
+            if moving then stopMove() end
+
+            ACTIVE_SEAT = seat
+            ORIGINAL_SEAT_SPEED = seat.MaxSpeed
+            updateBoatSpeed()
+        else
+            -- 離船
+            slideLocked = false
+            if ACTIVE_SEAT and ORIGINAL_SEAT_SPEED then
+                ACTIVE_SEAT.MaxSpeed = ORIGINAL_SEAT_SPEED
+            end
+            ACTIVE_SEAT = nil
+            ORIGINAL_SEAT_SPEED = nil
+
+            -- 下船：根據原本滑動狀態恢復
+            if wasMoving then
+                startMove()
+            else
+                currentVelocity = Vector3.zero
+            end
+        end
+    end)
+end
+
+if player.Character then onCharacter(player.Character) end
+player.CharacterAdded:Connect(onCharacter)
+
+-- ================= 預設關閉人物滑動 =================
+toggleMove(false)
+
+-- ================= 水上行走 =================
+local waterWalkEnabled = false
+local platform
+
+local function createPlatform()
+    if platform then platform:Destroy() end
+    platform = Instance.new("Part")
+    platform.Size = Vector3.new(50, 1, 50)
+    platform.Anchored = true
+    platform.CanCollide = true
+    platform.Transparency = 1
+    platform.Name = "WaterWalkPlatform"
+
+    local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local waterY = Workspace:FindFirstChild("Water") and Workspace.Water.Position.Y or 0
+    local offset = -3
+    platform.Position = Vector3.new(hrp.Position.X, waterY + offset, hrp.Position.Z)
+    platform.Parent = Workspace
+end
+
+local function updatePlatform()
+    if not platform then return end
+    local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local waterY = Workspace:FindFirstChild("Water") and Workspace.Water.Position.Y or 0
+    local playerY = hrp.Position.Y
+    local offset = -3
+
+    if playerY < waterY then
+        platform.CanCollide = false
+    else
+        platform.CanCollide = true
+        platform.Position = Vector3.new(hrp.Position.X, waterY + offset, hrp.Position.Z)
+    end
+end
+
+RunService.RenderStepped:Connect(function()
+    if waterWalkEnabled then
+        if not platform then createPlatform() end
+        updatePlatform()
+    else
+        if platform then
+            platform:Destroy()
+            platform = nil
+        end
+    end
+end)
+
+-- ===== Fly + Bring 核心狀態 =====
+local FlyTP = {
+    Enabled = false,
+    HoverHeight = 10,
+    SearchRange = 500
+}
+
+local BringNPC = {
+    Enabled = false,
+    PullRange = 100
+}
+
+local flyConn
+local pullConn
+local targetNPC
+
+local function stopFly()
+    if flyConn then
+        flyConn:Disconnect()
+        flyConn = nil
+    end
+    FlyTP.Enabled = false
+end
+
+local function startFly()
+    if flyConn then return end
+
+    flyConn = RunService.Heartbeat:Connect(function()
+        if not FlyTP.Enabled then return end
+
+        local char = player.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+
+        local enemiesFolder = workspace:FindFirstChild("Enemies")
+        if not enemiesFolder then return end
+
+        local closest, dist = nil, math.huge
+
+        for _, npc in pairs(enemiesFolder:GetChildren()) do
+            if npc:FindFirstChild("Humanoid")
+                and npc.Humanoid.Health > 0
+                and npc.PrimaryPart then
+
+                local p = npc.PrimaryPart.Position
+                local d = (p - hrp.Position).Magnitude
+
+                if d < dist and d <= FlyTP.SearchRange then
+                    dist = d
+                    closest = npc
+                end
+            end
+        end
+
+        targetNPC = closest
+
+        if targetNPC and targetNPC.PrimaryPart then
+            local tpos = Vector3.new(
+                targetNPC.PrimaryPart.Position.X,
+                targetNPC.PrimaryPart.Position.Y + FlyTP.HoverHeight,
+                targetNPC.PrimaryPart.Position.Z
+            )
+            hrp.CFrame = CFrame.new(tpos)
+        end
+    end)
+end
+
+local function stopBring()
+    if pullConn then
+        pullConn:Disconnect()
+        pullConn = nil
+    end
+    BringNPC.Enabled = false
+end
+
+local function startBring()
+    if pullConn then return end
+
+    pullConn = RunService.Heartbeat:Connect(function()
+        if not BringNPC.Enabled then return end
+        if not targetNPC or not targetNPC.PrimaryPart then return end
+
+        local enemiesFolder = workspace:FindFirstChild("Enemies")
+        if not enemiesFolder then return end
+
+        local basePos = targetNPC.PrimaryPart.Position
+
+        for _, npc in pairs(enemiesFolder:GetChildren()) do
+            if npc ~= targetNPC
+                and npc:FindFirstChild("Humanoid")
+                and npc.Humanoid.Health > 0
+                and npc.PrimaryPart then
+
+                local dist = (npc.PrimaryPart.Position - basePos).Magnitude
+
+                if dist <= BringNPC.PullRange then
+                    local newPos = Vector3.new(
+                        basePos.X,
+                        npc.PrimaryPart.Position.Y,
+                        basePos.Z
+                    )
+                    npc:SetPrimaryPartCFrame(CFrame.new(newPos))
+                end
+            end
+        end
+    end)
+end
+
+        -- ================= 核心 ESP 功能 =================
+        local Players = game:GetService("Players")
+        local RunService = game:GetService("RunService")
+        local LocalPlayer = Players.LocalPlayer
+
+        ESP_ENABLED = false
+        local ESP_COLOR = Color3.fromRGB(30,30,30)
+        local TEXT_COLOR = Color3.fromRGB(255,255,255)
+
+        local function createESP(player)
+            if player == LocalPlayer then return end
+            if not player.Character then return end
+            if player.Character:FindFirstChild("ESP_Highlight") then return end
+
+            local h = Instance.new("Highlight")
+            h.Name = "ESP_Highlight"
+            h.FillColor = ESP_COLOR
+            h.OutlineColor = Color3.fromRGB(255,255,255)
+            h.FillTransparency = 0.2
+            h.OutlineTransparency = 0
+            h.Adornee = player.Character
+            h.Parent = player.Character
+
+            local head = player.Character:FindFirstChild("Head")
+            if not head then return end
+
+            local bill = Instance.new("BillboardGui")
+            bill.Name = "ESP_Billboard"
+			bill.Size = UDim2.fromOffset(140,48)
+			bill.StudsOffset = Vector3.new(0,2.6,0)
+            bill.AlwaysOnTop = true
+            bill.Parent = head
+
+            local text = Instance.new("TextLabel", bill)
+            text.Name = "Info"
+            text.Position = UDim2.new(0,0,0,0)
+            text.BackgroundTransparency = 1
+            text.TextColor3 = TEXT_COLOR
+            text.TextStrokeTransparency = 0
+            text.Font = Enum.Font.SourceSansBold
+            text.TextYAlignment = Enum.TextYAlignment.Top
+            text.Text = player.Name
+			text.Size = UDim2.new(1, -8, 0.65, 0)
+			text.Position = UDim2.new(0,4,0,2)
+			text.TextScaled = true
+			text.TextWrapped = true
+			text.TextSize = 18
+			text.TextXAlignment = Enum.TextXAlignment.Center
+
+            local barBG = Instance.new("Frame", bill)
+            barBG.Name = "HP_Background"
+			barBG.Size = UDim2.new(0.9,0,0.12,0)
+			barBG.Position = UDim2.new(0.05,0,0.78,0)
+            barBG.BackgroundColor3 = Color3.fromRGB(50,50,50)
+            barBG.BorderSizePixel = 0
+
+            local barFG = Instance.new("Frame", barBG)
+            barFG.Name = "HP_Fill"
+            barFG.Size = UDim2.new(1,0,1,0)
+            barFG.Position = UDim2.new(0,0,0,0)
+            barFG.BackgroundColor3 = Color3.fromRGB(0,255,0)
+            barFG.BorderSizePixel = 0
+        end
+
+        local function removeESP(player)
+            if player == LocalPlayer then return end
+            if not player.Character then return end
+            local h = player.Character:FindFirstChild("ESP_Highlight")
+            if h then h:Destroy() end
+            local head = player.Character:FindFirstChild("Head")
+            if head then
+                local bill = head:FindFirstChild("ESP_Billboard")
+                if bill then bill:Destroy() end
+            end
+        end
+
+        local function updateESP()
+            if not ESP_ENABLED or not LocalPlayer.Character then return end
+            local myHRP = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if not myHRP then return end
+
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer and p.Character then
+                    local humanoid = p.Character:FindFirstChildOfClass("Humanoid")
+                    local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                    local head = p.Character:FindFirstChild("Head")
+                    if humanoid and hrp and head then
+                        local bill = head:FindFirstChild("ESP_Billboard")
+                        if bill then
+                            local info = bill:FindFirstChild("Info")
+                            local barFG = bill:FindFirstChild("HP_Background") and bill.HP_Background:FindFirstChild("HP_Fill")
+                            if info then
+                                local dist = math.floor((myHRP.Position - hrp.Position).Magnitude)
+									info.Text = string.format(
+										"%s\nHP: %d | %dm",
+										p.Name,
+										math.floor(humanoid.Health),
+										dist
+									)
+                            end
+                            if barFG then
+                                local healthRatio = math.clamp(humanoid.Health / humanoid.MaxHealth,0,1)
+                                if healthRatio > 0.6 then
+                                    barFG.BackgroundColor3 = Color3.fromRGB(0,255,0)
+                                elseif healthRatio > 0.3 then
+                                    barFG.BackgroundColor3 = Color3.fromRGB(255,255,0)
+                                else
+                                    barFG.BackgroundColor3 = Color3.fromRGB(255,0,0)
+                                end
+                                barFG.Size = UDim2.new(healthRatio,0,1,0)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- 每幀更新
+        RunService.RenderStepped:Connect(updateESP)
+
+        -- 玩家事件
+        local function setupPlayerESP(p)
+            if p == LocalPlayer then return end
+            p.CharacterAdded:Connect(function()
+                task.wait(0.2)
+                if ESP_ENABLED then createESP(p) end
+            end)
+            if ESP_ENABLED and p.Character then
+                createESP(p)
+            end
+        end
+
+        for _, p in ipairs(Players:GetPlayers()) do
+            setupPlayerESP(p)
+        end
+
+        Players.PlayerAdded:Connect(setupPlayerESP)
+        Players.PlayerRemoving:Connect(removeESP)
+
+        -- ================= Noclip 核心 =================
+        local NOCLIP_ENABLED = false
+        local noclipConn
+
+        local function setNoclipState(state)
+            NOCLIP_ENABLED = state
+
+            if state then
+                if noclipConn then return end
+                noclipConn = RunService.Stepped:Connect(function()
+                    local char = player.Character
+                    if not char then return end
+                    for _, part in ipairs(char:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            part.CanCollide = false
+                        end
+                    end
+                end)
+            else
+                if noclipConn then
+                    noclipConn:Disconnect()
+                    noclipConn = nil
+                end
+                
+                local char = player.Character
+                if char then
+                    for _, part in ipairs(char:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            part.CanCollide = true
+                        end
+                    end
+                end
+            end
+        end
+
+        -- ================= Low Graphics / AntiLag =================
+        local LOWGRAPHICS_ENABLED = false
+        local Terrain = workspace:FindFirstChildWhichIsA("Terrain")
+        local Lighting = game:GetService("Lighting")
+
+        local function ApplyLowGraphics(state)
+            LOWGRAPHICS_ENABLED = state
+
+            if state then
+                Terrain.WaterWaveSize = 0
+                Terrain.WaterWaveSpeed = 0
+                Terrain.WaterReflectance = 0
+                Terrain.WaterTransparency = 1
+                
+                Lighting.GlobalShadows = false
+                Lighting.FogEnd = 9e9
+                Lighting.FogStart = 9e9
+
+                settings().Rendering.QualityLevel = 1
+
+                for _, v in pairs(game:GetDescendants()) do
+                    if v:IsA("BasePart") then
+                        v.CastShadow = false
+                        v.Material = Enum.Material.Plastic
+                        v.Reflectance = 0
+                    elseif v:IsA("Decal") then
+                        v.Transparency = 1
+                        v.Texture = ""
+                    elseif v:IsA("ParticleEmitter") or v:IsA("Trail") then
+                        v.Lifetime = NumberRange.new(0)
+                    end
+                end
+                
+                for _, v in pairs(Lighting:GetDescendants()) do
+                    if v:IsA("PostEffect") then
+                        v.Enabled = false
+                    end
+                end
+                
+                workspace.DescendantAdded:Connect(function(child)
+                    task.spawn(function()
+                        if child:IsA("ForceField") 
+                        or child:IsA("Sparkles") 
+                        or child:IsA("Smoke") 
+                        or child:IsA("Fire") 
+                        or child:IsA("Beam") then
+                            RunService.Heartbeat:Wait()
+                            child:Destroy()
+                        elseif child:IsA("BasePart") then
+                            child.CastShadow = false
+                        end
+                    end)
+                end)
+
+            else
+                -- 可選：取消低配效果 (如不需要可留空)
+                Lighting.GlobalShadows = true
+            end
+        end
+
+local AntiAFK_ENABLED = false
+local AntiAFK_Connection
+
+-- 開啟 Anti-AFK
+local function enableAntiAFK()
+    if AntiAFK_ENABLED then return end
+    AntiAFK_ENABLED = true
+
+    if getconnections then
+        for _, connection in pairs(getconnections(Players.LocalPlayer.Idled)) do
+            if connection.Disable then
+                connection:Disable()
+            elseif connection.Disconnect then
+                connection:Disconnect()
+            end
+        end
+    else
+        AntiAFK_Connection = Players.LocalPlayer.Idled:Connect(function()
+            Services.VirtualUser:CaptureController()
+            Services.VirtualUser:ClickButton2(Vector2.new())
+        end)
+    end
+    print("Anti-AFK ON")
+end
+
+-- 關閉 Anti-AFK
+local function disableAntiAFK()
+    if not AntiAFK_ENABLED then return end
+    AntiAFK_ENABLED = false
+
+    if AntiAFK_Connection then
+        AntiAFK_Connection:Disconnect()
+        AntiAFK_Connection = nil
+    end
+    print("Anti-AFK OFF")
+end
+
+enableAntiAFK()
+
+        -- ===== v3核心 =====
+
+local Scripts = {}
+
+Scripts["自動v3"] = {
+    Enabled = false,
+    _conn = nil,
+
+    Func = function(self)
+        local VirtualInputManager = game:GetService("VirtualInputManager")
+        if self._conn then return end
+        self._conn = task.spawn(function()
+            while self.Enabled do
+                -- 按下 T
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.T, false, game)
+                task.wait(0.01)
+                -- 放開 T
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.T, false, game)
+                task.wait(0.1)
+            end
+        end)
+    end,
+
+    StopFunc = function(self)
+        self.Enabled = false
+        self._conn = nil
+    end
+}
+
+local V4_ENABLED = false
+local autoV4Connection -- 用來存 RunService 連線
+
+-- ================= 取得 Awakening RemoteFunction =================
+local function getAwakeningRemote()
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if backpack then
+        local awakening = backpack:FindFirstChild("Awakening")
+        if awakening then
+            return awakening:FindFirstChild("RemoteFunction")
+        end
+    end
+    return nil
+end
+
+-- ================= 核心邏輯 =================
+local JumpSettings = {
+    Enabled = false,
+    JumpPower = 100, -- 初始跳躍高度
+    MaxJumpPower = 500
+}
+
+local function updateJumpPower(player)
+    local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        if humanoid.UseJumpPower then
+            humanoid.JumpPower = JumpSettings.Enabled and JumpSettings.JumpPower or 50
+        else
+            humanoid.JumpHeight = JumpSettings.Enabled and JumpSettings.JumpPower or 7.2 -- 默認高度
+        end
+    end
+end
+
+-- ================= State =================
+local FlyEnabled = false
+local NoclipEnabled = false
+
+-- ================= Tween Fly =================
+local function topos(Pos)
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local Distance = (Pos.Position - hrp.Position).Magnitude
+    local Speed = 300
+    if Distance < 25 then
+        Speed = 10000
+    elseif Distance < 50 then
+        Speed = 2000
+    elseif Distance < 150 then
+        Speed = 800
+    elseif Distance < 250 then
+        Speed = 600
+    elseif Distance < 500 then
+        Speed = 400
+    elseif Distance < 750 then
+        Speed = 350
+    elseif Distance >= 1000 then
+        Speed = 300
+    end
+
+    TweenService:Create(
+        hrp,
+        TweenInfo.new(Distance / Speed, Enum.EasingStyle.Linear),
+        {CFrame = Pos}
+    ):Play()
+end
+
+local function StopTween()
+    _G.StopTween = true
+    wait()
+    topos(LocalPlayer.Character.HumanoidRootPart.CFrame)
+    wait()
+    local clipPart = LocalPlayer.Character.HumanoidRootPart:FindFirstChild("BodyClip")
+    if clipPart then clipPart:Destroy() end
+    local highlight = LocalPlayer.Character:FindFirstChild("Highlight")
+    if highlight then highlight:Destroy() end
+    _G.StopTween = false
+end
+
+-- ================= Fly Control =================
+local function EnableFly()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.PlatformStand = true end
+end
+
+local function DisableFly()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.PlatformStand = false end
+end
+
+-- ================= Noclip =================
+RunService.Stepped:Connect(function()
+    if NoclipEnabled then
+        local char = LocalPlayer.Character
+        if char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                end
+            end
+        end
+    end
+end)
+
+-- ================= Fly Movement =================
+RunService.RenderStepped:Connect(function()
+    if FlyEnabled then
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+
+        local direction = Vector3.new(
+            (UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0),
+            (UserInputService:IsKeyDown(Enum.KeyCode.Space) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) and 1 or 0),
+            (UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.W) and 1 or 0)
+        )
+
+        if direction.Magnitude > 0 then
+            local targetPos = hrp.CFrame + direction.Unit * 5 -- 每次小幅移動
+            topos(targetPos)
+        end
+    end
+end)
+
+-- =====================
+-- Remove Fog Core
+-- =====================
+local function RemoveFog()
+    local lightingService = game:GetService("Lighting")
+
+    if lightingService:FindFirstChild("LightingLayers") then
+        lightingService.LightingLayers:Destroy()
+    end
+
+    if lightingService:FindFirstChild("Sky") then
+        lightingService.Sky:Destroy()
+    end
+
+    lightingService.FogEnd = 9e9
+end
+
+-- lava 核心
+local function removeLava()
+    for _, v in pairs(game.Workspace:GetDescendants()) do
+        if v.Name == "LavaParts" and v.Parent and v.Parent.Name == "CircleIsland" 
+            and v.Parent.Parent and v.Parent.Parent.Name == "Map" then
+            v:Destroy()
+        end
+    end
+
+    for _, v in pairs(game.ReplicatedStorage:GetDescendants()) do
+        if v.Name == "LavaParts" and v.Parent and v.Parent.Name == "CircleIsland" 
+            and v.Parent.Parent and v.Parent.Parent.Name == "Map" then
+            v:Destroy()
+        end
+    end
+end
+
+--==================================================
+-- Player & Character
+--==================================================
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local character
+local humanoid
+local hrp
+
+local function getCharacterParts()
+    character = player.Character
+    if not character then return false end
+    humanoid = character:FindFirstChild("Humanoid")
+    hrp = character:FindFirstChild("HumanoidRootPart")
+    if humanoid and hrp then
+        return true
+    end
+    return false
+end
+
+player.CharacterAdded:Connect(function(char)
+    character = char
+    humanoid = char:WaitForChild("Humanoid")
+    hrp = char:WaitForChild("HumanoidRootPart")
+end)
+
+--==================================================
+-- Config / State
+--==================================================
+local CHECK_INTERVAL = 1
+local DETECTION_RADIUS = 1000
+local AutoTeleportEnabled = false
+local isTeleporting = false
+
+--==================================================
+-- Core Functions
+--==================================================
+local function enemiesAlive()
+    local enemies = workspace:FindFirstChild("Enemies")
+    if not enemies then return false end
+    for _, npc in ipairs(enemies:GetChildren()) do
+        local hum = npc:FindFirstChild("Humanoid")
+        local root = npc:FindFirstChild("HumanoidRootPart") or npc:FindFirstChild("Head")
+        if hum and hum.Health > 0 and root and hrp then
+            if (root.Position - hrp.Position).Magnitude <= DETECTION_RADIUS then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function bossAlive()
+    local boss = workspace:FindFirstChild("Boss")
+    if boss and boss:FindFirstChild("Humanoid") and boss.Humanoid.Health > 0 then
+        return true
+    end
+    local enemies = workspace:FindFirstChild("Enemies")
+    if enemies then
+        for _, npc in ipairs(enemies:GetChildren()) do
+            if string.find(string.lower(npc.Name), "boss") then
+                local hum = npc:FindFirstChild("Humanoid")
+                if hum and hum.Health > 0 then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function canTeleport()
+    return not enemiesAlive() and not bossAlive()
+end
+
+local function getClosestExit()
+    local map = workspace:FindFirstChild("Map")
+    if not map then return nil end
+    local dungeon = map:FindFirstChild("Dungeon")
+    if not dungeon then return nil end
+
+    local closest, minDist = nil, math.huge
+    for _, f in ipairs(dungeon:GetChildren()) do
+        if tonumber(f.Name) then
+            local tp = f:FindFirstChild("ExitTeleporter")
+            if tp and tp:FindFirstChild("Root") then
+                local d = (tp.Root.Position - hrp.Position).Magnitude
+                if d < minDist then
+                    minDist = d
+                    closest = tp.Root
+                end
+            end
+        end
+    end
+    return closest
+end
+
+local function teleportToExit(exitRoot)
+    if isTeleporting or not exitRoot then return end
+    isTeleporting = true
+    humanoid.WalkSpeed = 0
+    humanoid.JumpPower = 0
+    hrp.CFrame = exitRoot.CFrame
+    humanoid.WalkSpeed = 16
+    humanoid.JumpPower = 50
+    isTeleporting = false
+end
+
+--==================================================
+-- Auto-Teleport Loop
+--==================================================
+task.spawn(function()
+    while task.wait(CHECK_INTERVAL) do
+        if not AutoTeleportEnabled then continue end
+        if not getCharacterParts() or humanoid.Health <= 0 then continue end
+        if canTeleport() then
+            local exit = getClosestExit()
+            if exit then
+                teleportToExit(exit)
+            end
+        end
+    end
+end)
+
+-- 全局狀態
+local FlyEnabled = false
+local NoclipEnabled = false
+local FlySpeed = 350
+local CurrentTargetPosition = nil
+
+-- 停止飛行與 Noclip 的函數
+local function DisableFlyAndNoclip()
+    local char = LocalPlayer.Character
+    if char then
+        -- 停飛
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then hum.PlatformStand = false end
+
+        -- 停 Noclip，恢復碰撞
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = true
+                part.Velocity = Vector3.zero
+            end
+        end
+    end
+    FlyEnabled = false
+    NoclipEnabled = false
+    CurrentTargetPosition = nil
+    print("飛行與穿牆已完全關閉")
+end
+
+-- 啟用飛行
+local function EnableFly()
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then hum.PlatformStand = true end
+    end
+end
+
+-- Noclip 迴圈（只在啟用時改變碰撞）
+RunService.Stepped:Connect(function()
+    if NoclipEnabled then
+        local char = LocalPlayer.Character
+        if char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                end
+            end
+        end
+    end
+end)
+
+-- 飛行移動
+RunService.RenderStepped:Connect(function()
+    if FlyEnabled and CurrentTargetPosition then
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local direction = CurrentTargetPosition - hrp.Position
+            local distance = direction.Magnitude
+
+            if distance > 1 then
+                hrp.Velocity = direction.Unit * FlySpeed
+            else
+                hrp.Velocity = Vector3.zero
+                DisableFlyAndNoclip()
+                print("已到達目標！")
+            end
+        end
+    end
+end)
+
+-- 通用 SmartTeleport
+function SmartTeleport(intermediate, target)
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local hrp = char:WaitForChild("HumanoidRootPart")
+
+    local distanceToTarget = (hrp.Position - target).Magnitude
+    local distanceIntermediateToTarget = (intermediate.Position - target).Magnitude
+
+    if distanceToTarget <= distanceIntermediateToTarget then
+        CurrentTargetPosition = target
+        FlyEnabled = true
+        NoclipEnabled = true
+        EnableFly()
+        print("直接飛行至終點...")
+    else
+        hrp.CFrame = intermediate
+        print("傳送到經過點...")
+        task.wait(0.2)
+        CurrentTargetPosition = target
+        FlyEnabled = true
+        NoclipEnabled = true
+        EnableFly()
+        print("經過點完成，飛行至終點...")
+    end
+end
+
+-- ================= State =================
+local FlyEnabled = false
+local TargetPlayer = nil
+local NoclipEnabled = false
+local FlySpeed = 350
+
+-- ================= Fly Functions =================
+local function EnableFly()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.PlatformStand = true
+    end
+end
+
+local function DisableFly()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.PlatformStand = false
+    end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.Velocity = Vector3.zero
+    end
+end
+
+-- ================= Noclip =================
+RunService.Stepped:Connect(function()
+    if not NoclipEnabled then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = false
+        end
+    end
+end)
+
+-- ================= Fly Logic =================
+RunService.RenderStepped:Connect(function()
+    if not FlyEnabled or not TargetPlayer then return end
+
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local targetChar = TargetPlayer.Character
+    local targetHRP = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+    if not hrp or not targetHRP then return end
+
+    local direction = (targetHRP.Position - hrp.Position)
+    if direction.Magnitude > 0 then
+        hrp.Velocity = direction.Unit * FlySpeed
+    end
+end)
+
+
+local TeleportTargets = {
+    {
+        Name = "海軍戰艦1",
+        Intermediate = CFrame.new(-7906, 5546, -379),
+        Target = Vector3.new(-3161, 209, 2067)
+    },
+    {
+        Name = "新手村2",
+        Intermediate = CFrame.new(-7906, 5546, -379),
+        Target = Vector3.new(1106, 16, 1431)
+    },
+    {
+        Name = "叢林3",
+        Intermediate = CFrame.new(-7906, 5546, -379),
+        Target = Vector3.new(-1422, 48, 21)
+    },
+    {
+        Name = "海盜村4",
+        Intermediate = CFrame.new(-7906, 5546, -379),
+        Target = Vector3.new( -1151, 131, 4166)
+    },
+    {
+        Name = "中城5",
+        Intermediate = CFrame.new(-7906, 5546, -379),
+        Target = Vector3.new( -786, 74, 1607)
+    },
+    {
+        Name = "可樂6",
+        Intermediate = CFrame.new(-7906, 5546, -379),
+        Target = Vector3.new( -1880, 25, -3320)
+    },
+    {
+        Name = "水下7",
+        Intermediate = CFrame.new(4039, 2, -1820),
+        Target = Vector3.new(4039, 2, -1820)
+    },
+    {
+        Name = "噴泉8",
+        Intermediate = CFrame.new(-7906, 5546, -379),
+        Target = Vector3.new(5668, 580, 4301)
+    },
+    {
+        Name = "上空島9",
+        Intermediate = CFrame.new(-4624, 853, -1700),
+        Target = Vector3.new(-7950, 5814, -1968)
+    },
+    {
+        Name = "空島10",
+        Intermediate = CFrame.new(-7906, 5546, -379),
+        Target = Vector3.new(-4913, 738, -2578)
+    },
+    {
+        Name = "沙漠11",
+        Intermediate = CFrame.new(-7906, 5546, -379),
+        Target = Vector3.new(1055, 52, 4490)
+    },
+    {
+        Name = "火山12",
+        Intermediate = CFrame.new(-7906, 5546, -379),
+        Target = Vector3.new(-5412, 11, 8454)
+    },
+    {
+        Name = "監獄13",
+        Intermediate = CFrame.new(61169, 2, 1948),
+        Target = Vector3.new(5327, 89, 717)
+    },
+    {
+        Name = "海洋堡壘14",
+        Intermediate = CFrame.new(-7906, 5546, -379),
+        Target = Vector3.new(-5150, 375, 4445)
+    },
+    {
+        Name = "雪地15",
+        Intermediate = CFrame.new(61169, 2, 1948),
+        Target = Vector3.new(1486, 87,-1281)
+    },
+    {
+        Name = "暴徒領地16",
+        Intermediate = CFrame.new(-7906,5546, -379),
+        Target = Vector3.new(-2836, 7,5325)
+    },
+    {
+        Name = "碼頭(2)17",
+        Intermediate = CFrame.new( 2283,  19,  911),
+        Target = Vector3.new(-11, 38,2724)
+    },
+    {
+        Name = "鬼船18",
+        Intermediate = CFrame.new( -6504,  83,  -123),
+        Target = Vector3.new(919, 126,33133)
+    },
+    {
+        Name = "墓地19",
+        Intermediate = CFrame.new( 922,  125,  32843),
+        Target = Vector3.new(-5620, 492,-778)
+    },
+    {
+        Name = "咖啡廳20",
+        Intermediate = CFrame.new( 2283,  19,  911),
+        Target = Vector3.new(-380, 95,252)
+    },
+    {
+        Name = "黑暗競技場21",
+        Intermediate = CFrame.new(-286,306,593),
+        Target = Vector3.new(3776, 15,-3499)
+    },
+    {
+        Name = "骷髏島22",
+        Intermediate = CFrame.new( 922,  125,  32843),
+        Target = Vector3.new(-2682, 708,-10966)
+    },
+    {
+        Name = "狗屋23",
+        Intermediate = CFrame.new( 2283,  19,  911),
+        Target = Vector3.new(-2059, 126,-83)
+    },
+    {
+        Name = "岩漿24",
+        Intermediate = CFrame.new( 922,  125,  32843),
+        Target = Vector3.new(-5176, 175,-5426)
+    },
+    {
+        Name = "Raid25",
+        Intermediate = CFrame.new( 922,  125,  32843),
+        Target = Vector3.new(-6493, 305,-4728)
+    },
+    {
+        Name = "雪地26",
+        Intermediate = CFrame.new(-286,306,593),
+        Target = Vector3.new(775, 410,-5265)
+    },
+    {
+        Name = "可樂27",
+        Intermediate = CFrame.new( 2283,  19,  911),
+        Target = Vector3.new(-1842,46,1362)
+    },
+    {
+        Name = "實驗室28",
+        Intermediate = CFrame.new( 922,  125,  32843),
+        Target = Vector3.new(-5380,219,-5936)
+    },
+    {
+        Name = "豪宅29",
+        Intermediate = CFrame.new( 2283,  19,  911),
+        Target = Vector3.new(-391,322,854)
+    },
+    {
+        Name = "碼頭(4)30",
+        Intermediate = CFrame.new( 922,  125,  32843),
+        Target = Vector3.new(-6001,29,-5024)
+    },
+    {
+        Name = "遠程31",
+        Intermediate = CFrame.new( 2283,  19,  911),
+        Target = Vector3.new(4756,8,2845)
+    },
+    {
+        Name = "碼頭(1)32",
+        Intermediate = CFrame.new( 2283,  19,  911),
+        Target = Vector3.new(-917,8,1807)
+    },
+    {
+        Name = "冬季城堡33",
+        Intermediate = CFrame.new( 2283,  19,  911),
+        Target = Vector3.new(6007,294,-6637)
+    },
+    {
+        Name = "碼頭(3)34",
+        Intermediate = CFrame.new( 2283,  19,  911),
+        Target = Vector3.new(-1920,6,-2554)
+    },
+    {
+        Name = "工廠35",
+        Intermediate = CFrame.new( 2283,  19,  911),
+        Target = Vector3.new(430,211,-430)
+    },
+    {
+        Name = "未知36",
+        Intermediate = CFrame.new( 922,  125,  32843),
+        Target = Vector3.new(-5157, 3,2377)
+    },
+    {
+        Name = "港口37",
+        Intermediate = CFrame.new(-5027,317, -3207),
+        Target = Vector3.new(-572, 232,5770)
+    },
+    {
+        Name = "烏龜屋38",
+        Intermediate = CFrame.new(-5060,317,-3193),
+        Target = Vector3.new(-12550, 337,-7506)
+    },
+    {
+        Name = "海上城堡39",
+        Intermediate = CFrame.new(-12464,376,-7566),
+        Target = Vector3.new(-4929, 317,-3041)
+    },
+    {
+        Name = "大媽島40",
+        Intermediate = CFrame.new(-12464,376,-7566),
+        Target = Vector3.new(-726, 381,-10977)
+    },
+    {
+        Name = "海德拉41",
+        Intermediate = CFrame.new(-5027,317, -3207),
+        Target = Vector3.new(5761, 1089,467)
+    },
+    {
+        Name = "司法島42",
+        Intermediate = CFrame.new( -5097,  317,  -3177),
+        Target = Vector3.new(-15988, 470,938)
+    },
+    {
+        Name = "烏龜中心43",
+        Intermediate = CFrame.new( 5369,  25,  -506),
+        Target = Vector3.new(-11993, 332,-9089)
+    },
+    {
+        Name = "大樹44",
+        Intermediate = CFrame.new(-5027,317, -3207),
+        Target = Vector3.new(2551, 128,-6950)
+    },
+    {
+        Name = "烏龜山55",
+        Intermediate = CFrame.new( 5369,  25,  -506),
+        Target = Vector3.new(-12807, 897,-10793)
+    },
+    {
+        Name = "鬧鬼城堡56",
+        Intermediate = CFrame.new( -5097,  317,  -3177),
+        Target = Vector3.new(-9515, 164,5787)
+    },
+    {
+        Name = "花生島57",
+        Intermediate = CFrame.new(-12464,376,-7566),
+        Target = Vector3.new(-2040, 5,-9814)
+    },
+    {
+        Name = "烏龜入口58",
+        Intermediate = CFrame.new(-5060,317,-3193),
+        Target = Vector3.new(-10076, 332,-8321)
+    },
+    {
+        Name = "海德拉競技場59",
+        Intermediate = CFrame.new(-11993,332,-8837),
+        Target = Vector3.new(5014, 59,-1543)
+    },
+    {
+        Name = "可可島60",
+        Intermediate = CFrame.new(-12464,376,-7566),
+        Target = Vector3.new(182, 127,-12769)
+    },
+    {
+        Name = "蛋糕島61",
+        Intermediate = CFrame.new(-12464,376,-7566),
+        Target = Vector3.new(-2102, 70,-12134)
+    },
+}
+
+--// 核心狀態
+local selectedType = "Melee"
+local autoEquipEnabled = false
+
+-- 裝備函數
+local function equipByType(toolType)
+    selectedType = toolType
+    if autoEquipEnabled then
+        local char = player.Character or player.CharacterAdded:Wait()
+        local hum = char:WaitForChild("Humanoid")
+        for _, tool in ipairs(player.Backpack:GetChildren()) do
+            if tool:IsA("Tool") and tool.ToolTip == toolType then
+                hum:EquipTool(tool)
+                break
+            end
+        end
+    end
+end
+
+-- 自動監控裝備
+local function monitorCurrentTool()
+    task.spawn(function()
+        while true do
+            task.wait(0.1)
+            if autoEquipEnabled then
+                local char = player.Character
+                if char then
+                    local hum = char:FindFirstChildOfClass("Humanoid")
+                    if hum then
+                        local tool = hum:FindFirstChildOfClass("Tool")
+                        if not tool or tool.ToolTip ~= selectedType then
+                            equipByType(selectedType)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+-- 角色生成監控
+player.CharacterAdded:Connect(function()
+    task.wait(1)
+    equipByType(selectedType)
+    monitorCurrentTool()
+end)
+
+-- 初始監控
+monitorCurrentTool()
+
+--// Camlock Core
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+CamlockEnabled = false
+TargetPlayer = nil
+
+local CamlockConnection
+
+local function StartCamlock()
+    if CamlockConnection then CamlockConnection:Disconnect() end
+
+    CamlockConnection = RunService.RenderStepped:Connect(function()
+        if not CamlockEnabled then return end
+        if not TargetPlayer then return end
+        if not TargetPlayer.Character then return end
+
+        local hrp = TargetPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+
+        Camera.CFrame = Camera.CFrame:Lerp(
+            CFrame.new(Camera.CFrame.Position, hrp.Position),
+            1
+        )
+    end)
+end
+
+local function StopCamlock()
+    if CamlockConnection then
+        CamlockConnection:Disconnect()
+        CamlockConnection = nil
+    end
+end
+
+StartCamlock()
+
+
+local Hitbox = {
+    Enabled = false,
+    Size = 1,
+    Transparency = 0.5,
+    Connections = {}
+}
+
+local function getRoot(character)
+    return character:FindFirstChild("HumanoidRootPart")
+end
+
+function Hitbox:ApplyToPlayer(plr)
+    if plr == LocalPlayer then return end
+    if not plr.Character then return end
+
+    local root = getRoot(plr.Character)
+    if root and root:IsA("BasePart") then
+        root.CanCollide = false
+        root.Size = Vector3.new(self.Size, self.Size, self.Size)
+        root.Transparency = self.Transparency
+    end
+end
+
+function Hitbox:ApplyAll()
+    for _, plr in pairs(Players:GetPlayers()) do
+        self:ApplyToPlayer(plr)
+    end
+end
+
+function Hitbox:Start()
+    if self.Enabled then return end
+    self.Enabled = true
+
+    self:ApplyAll()
+
+    -- 玩家重生時重新套用
+    self.Connections.PlayerAdded = Players.PlayerAdded:Connect(function(plr)
+        plr.CharacterAdded:Connect(function()
+            task.wait(1)
+            if self.Enabled then
+                self:ApplyToPlayer(plr)
+            end
+        end)
+    end)
+end
+
+function Hitbox:Stop()
+    self.Enabled = false
+end
+
+-- 假設已經有一個核心模組處理攝影機
+local CameraController = {}
+CameraController.MinZoom = 1000
+CameraController.MaxZoom = 10000
+CameraController.Step = 100
+CameraController.CurrentZoom = 1000
+
+function CameraController:SetZoom(value)
+    value = tonumber(value)
+    if value then
+        if value < self.MinZoom then value = self.MinZoom end
+        if value > self.MaxZoom then value = self.MaxZoom end
+        value = math.floor(value / self.Step) * self.Step
+        self.CurrentZoom = value
+        game.Players.LocalPlayer.CameraMaxZoomDistance = value
+    end
+end
+
+-- 初始化
+CameraController:SetZoom(CameraController.CurrentZoom)
+
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+
+player.CharacterAdded:Connect(function(char)
+	character = char
+end)
+
+-- 對外開關（由 Xu-hub 按鈕控制）
+getgenv().AUTO_ATTACK_ENABLED = false
+
+-- 攻擊設定
+local ATTACK_INTERVAL = 0.01
+local RANGE_MULTIPLIER = 1000
+
+local attackTimer = 0
+
+RunService.Heartbeat:Connect(function(dt)
+	if not getgenv().AUTO_ATTACK_ENABLED then return end
+	if not character then return end
+
+	local tool = character:FindFirstChildOfClass("Tool")
+	if not tool then return end
+
+	attackTimer += dt
+	if attackTimer < ATTACK_INTERVAL then return end
+	attackTimer = 0
+
+	local handle = tool:FindFirstChild("Handle")
+	if handle and not handle:GetAttribute("HitboxExpanded") then
+		handle.Size = handle.Size * RANGE_MULTIPLIER
+		handle.Transparency = 1
+		handle.CanCollide = false
+		handle:SetAttribute("HitboxExpanded", true)
+	end
+
+	tool:Activate()
+end)
+
+-- ===== ScreenGui =====
+local screenGui = Instance.new("ScreenGui")
+screenGui.Parent = PlayerGui
+screenGui.Name = "XuHubGui"
+
+-- ===== 小長方形開關 (透明黑邊 + 可拖動) =====
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.new(0,90,0,38)
+toggleBtn.Position = UDim2.new(0, 20, 1, -80)
+toggleBtn.Text = "Xu-hub"
+toggleBtn.BackgroundColor3 = Color3.fromRGB(0,0,0)
+toggleBtn.BackgroundTransparency = 0.7
+toggleBtn.TextColor3 = Color3.fromRGB(255,255,255)
+toggleBtn.BorderSizePixel = 2
+toggleBtn.BorderColor3 = Color3.fromRGB(0,0,0)
+toggleBtn.TextScaled = true
+toggleBtn.Parent = screenGui
+
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0,10)
+toggleCorner.Parent = toggleBtn
+
+-- 彩虹文字效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    toggleBtn.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+-- 可拖動功能
+local dragging = false
+local dragInput, mousePos, framePos
+
+toggleBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        mousePos = input.Position
+        framePos = toggleBtn.Position
+
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+toggleBtn.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement then
+        dragInput = input
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if dragging and dragInput then
+        local delta = dragInput.Position - mousePos
+        toggleBtn.Position = UDim2.new(
+            framePos.X.Scale,
+            framePos.X.Offset + delta.X,
+            framePos.Y.Scale,
+            framePos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+local function updateToggleByMainFrame()
+    -- 小長方形 ≈ GUI 寬度的 15%，高度固定比例
+local w = math.clamp(mainFrame.Size.X.Offset * 0.12, 80, 120)
+local h = math.clamp(mainFrame.Size.Y.Offset * 0.06, 32, 48)
+
+    toggleBtn.Size = UDim2.new(0, w, 0, h)
+
+    -- 若 GUI 是顯示狀態，保持 toggle 在 GUI 上方中央
+    if mainFrame.Visible then
+        toggleBtn.Position = UDim2.new(
+            0.5, -w/2,
+            mainFrame.Position.Y.Scale,
+            mainFrame.Position.Y.Offset - h - 8
+        )
+    end
+end
+
+toggleBtn.TextScaled = true
+toggleBtn.TextSize = 18 -- 保險用，TextScaled 開著其實會自動
+
+local mainFrame = Instance.new("Frame")
+mainFrame.BackgroundColor3 = Color3.fromRGB(30,30,30)
+mainFrame.BackgroundTransparency = 0.3
+mainFrame.BorderSizePixel = 0
+mainFrame.Visible = false
+mainFrame.Parent = screenGui
+
+local camera = workspace.CurrentCamera
+local viewportSize = camera.ViewportSize
+
+local screenWidth = viewportSize.X
+local screenHeight = viewportSize.Y
+
+-- 設定比例
+local widthScale = 0.5   -- 原本 0.65
+local heightScale = 0.65 -- 高度也稍微縮一點
+
+-- 計算基礎尺寸
+local calculatedWidth = screenWidth * widthScale
+local calculatedHeight = screenHeight * heightScale
+
+-- 設定最大最小限制
+local minWidth = 450     -- 原本 600
+local minHeight = 350    -- 原本 400
+local maxWidth = 950     -- 原本 1200
+local maxHeight = 800    -- 原本 900
+
+calculatedWidth = math.clamp(calculatedWidth, minWidth, maxWidth)
+calculatedHeight = math.clamp(calculatedHeight, minHeight, maxHeight)
+
+-- 套用
+mainFrame.Size = UDim2.new(0, calculatedWidth, 0, calculatedHeight)
+mainFrame.Position = UDim2.new(
+    0.5, -calculatedWidth/2,
+    0.5, -calculatedHeight/2
+)
+
+camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+    local viewportSize = camera.ViewportSize
+    local screenWidth = viewportSize.X
+    local screenHeight = viewportSize.Y
+
+local calculatedWidth = math.clamp(screenWidth * 0.5, 450, 950)
+local calculatedHeight = math.clamp(screenHeight * 0.65, 350, 800)
+
+    mainFrame.Size = UDim2.new(0, calculatedWidth, 0, calculatedHeight)
+    mainFrame.Position = UDim2.new(
+        0.5, -calculatedWidth/2,
+        0.5, -calculatedHeight/2
+    )
+
+    updateToggleByMainFrame()
+end)
+
+local originalSize = mainFrame.Size
+local originalPosition = mainFrame.Position
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0,10)
+mainCorner.Parent = mainFrame
+
+-- ===== 標題列 =====
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1,0,0,50)
+titleBar.BackgroundColor3 = Color3.fromRGB(20,20,20)
+titleBar.BackgroundTransparency = 0.3
+titleBar.Parent = mainFrame
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1,-20,1,0)
+titleLabel.Position = UDim2.new(0,10,0,0)
+titleLabel.Text = "Xu-hub"
+titleLabel.TextColor3 = Color3.fromRGB(255,255,255)
+titleLabel.BackgroundTransparency = 1
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Font = Enum.Font.SourceSansBold
+titleLabel.TextSize = 32
+titleLabel.Parent = titleBar
+
+-- 關閉按鈕
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0,30,0,30)
+closeBtn.Position = UDim2.new(1,-40,0,10)
+closeBtn.Text = "X"
+closeBtn.BackgroundColor3 = Color3.fromRGB(70,70,70)
+closeBtn.BackgroundTransparency = 0.2
+closeBtn.TextColor3 = Color3.fromRGB(255,255,255)
+closeBtn.Parent = titleBar
+closeBtn.MouseButton1Click:Connect(function()
+    mainFrame:Destroy()
+    toggleBtn:Destroy()
+end)
+
+-- 縮小化按鈕 (-)
+local minimizeBtn = Instance.new("TextButton")
+minimizeBtn.Size = UDim2.new(0,30,0,30)
+minimizeBtn.Position = UDim2.new(1,-80,0,10)
+minimizeBtn.Text = "-"
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(70,70,70)
+minimizeBtn.BackgroundTransparency = 0.2
+minimizeBtn.TextColor3 = Color3.fromRGB(255,255,255)
+minimizeBtn.Parent = titleBar
+
+local isMinimized = false
+local originalSize = mainFrame.Size
+local originalPosition = mainFrame.Position
+
+minimizeBtn.MouseButton1Click:Connect(function()
+    if not isMinimized then
+        mainFrame.Size = UDim2.new(0, originalSize.X.Offset, 0, titleBar.Size.Y.Offset)
+        isMinimized = true
+        contentFrame.Visible = false
+        sideBar.Visible = false
+    else
+        mainFrame.Size = originalSize
+        mainFrame.Position = originalPosition
+        isMinimized = false
+        contentFrame.Visible = true
+        sideBar.Visible = true
+    end
+end)
+
+local sideWidth = math.clamp(mainFrame.Size.X.Offset * 0.2, 120, 250)
+
+local sideBar = Instance.new("ScrollingFrame")
+sideBar.Size = UDim2.new(0, sideWidth, 1, -50)
+sideBar.Position = UDim2.new(0,0,0,50)
+sideBar.BackgroundColor3 = Color3.fromRGB(50,50,50)
+sideBar.BackgroundTransparency = 0.4
+sideBar.BorderSizePixel = 0
+sideBar.ScrollBarThickness = 6
+sideBar.Parent = mainFrame
+
+local sideCorner = Instance.new("UICorner")
+sideCorner.CornerRadius = UDim.new(0,10)
+sideCorner.Parent = sideBar
+
+local contentFrame = Instance.new("ScrollingFrame")
+contentFrame.Size = UDim2.new(1, -sideWidth, 1, -50)
+contentFrame.Position = UDim2.new(0, sideWidth, 0, 50)
+contentFrame.BackgroundColor3 = Color3.fromRGB(40,40,40)
+contentFrame.BackgroundTransparency = 0.8
+contentFrame.BorderSizePixel = 0
+contentFrame.ScrollBarThickness = 6
+contentFrame.Parent = mainFrame
+
+local contentCorner = Instance.new("UICorner")
+contentCorner.CornerRadius = UDim.new(0,10)
+contentCorner.Parent = contentFrame
+
+-- ===== GUI 顯示/隱藏功能 =====
+local guiVisible = false
+local tweenTime = 0.25
+
+local function showGUI()
+    guiVisible = true
+    toggleBtn.Visible = true
+    mainFrame.Visible = true
+    sideBar.Visible = true
+    contentFrame.Visible = true
+
+    mainFrame.Size = UDim2.new(0, toggleBtn.Size.X.Offset, 0, toggleBtn.Size.Y.Offset)
+    mainFrame.Position = toggleBtn.Position
+
+    local tweenInfo = TweenInfo.new(tweenTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    local goal = {Size = originalSize, Position = originalPosition}
+    TweenService:Create(mainFrame, tweenInfo, goal):Play()
+end
+
+local function hideGUI()
+    guiVisible = false
+
+    local tweenInfo = TweenInfo.new(tweenTime, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+    local goal = {
+        Size = UDim2.new(0, toggleBtn.Size.X.Offset, 0, toggleBtn.Size.Y.Offset),
+        Position = toggleBtn.Position
+    }
+    local tween = TweenService:Create(mainFrame, tweenInfo, goal)
+    tween:Play()
+    tween.Completed:Connect(function()
+        mainFrame.Visible = false
+        sideBar.Visible = false
+        contentFrame.Visible = false
+        toggleBtn.Visible = true
+    end)
+end
+
+if not isMobile then
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == Enum.KeyCode.RightControl then
+            if guiVisible then
+                hideGUI()
+            else
+                showGUI()
+            end
+        end
+    end)
+end
+
+toggleBtn.MouseButton1Click:Connect(function()
+    if guiVisible then
+        hideGUI()
+    else
+        showGUI()
+    end
+end)
+
+local buttonNames = {
+    "自動", "通用", "Server", "狀態", "PVP", 
+    "Farm", "設定", "傳送", "娛樂", "其他"
+}
+
+local buttons = {}
+
+for i=1,10 do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1,-20,0,50)
+    btn.Position = UDim2.new(0,10,0,10 + (i-1)*60)
+    btn.Text = buttonNames[i]
+    btn.BackgroundColor3 = Color3.fromRGB(70,70,70)
+    btn.TextColor3 = Color3.fromRGB(255,255,255)
+    btn.BorderSizePixel = 0
+    btn.Font = Enum.Font.SourceSansBold
+
+    if isMobile then
+        btn.TextSize = 16
+        btn.TextScaled = false
+    else
+        btn.TextScaled = true
+    end
+
+    btn.Parent = sideBar
+
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0,10)
+    btnCorner.Parent = btn
+
+    local indicator = Instance.new("Frame")
+    indicator.Size = UDim2.new(0,4,1,0)
+    indicator.BackgroundColor3 = Color3.fromRGB(0,120,255)
+    indicator.Visible = false
+    indicator.Parent = btn
+
+    buttons[i] = {Button = btn, Indicator = indicator}
+end
+
+        -- ===== 右側內容生成函數 =====
+        local function createOptionRow(parent, yPos, labelText, contentFunc)
+            local rowFrame = Instance.new("Frame")
+            rowFrame.Size = UDim2.new(1,-20,0,50)
+            rowFrame.Position = UDim2.new(0,10,0,yPos)
+            rowFrame.BackgroundColor3 = Color3.fromRGB(50,50,50)
+            rowFrame.BorderSizePixel = 0
+            rowFrame.Parent = parent
+
+            local rowCorner = Instance.new("UICorner")
+            rowCorner.CornerRadius = UDim.new(0,10)
+            rowCorner.Parent = rowFrame
+
+            local label = Instance.new("TextLabel")
+            label.Size = UDim2.new(0,160,1,0)
+            label.Position = UDim2.new(0,10,0,0)
+            label.BackgroundTransparency = 1
+            label.Text = labelText
+            label.TextColor3 = Color3.fromRGB(255,255,255)
+            label.TextScaled = true
+            label.TextSize = 20
+            label.TextWrapped = false
+            label.TextXAlignment = Enum.TextXAlignment.Left
+            label.Parent = rowFrame
+
+            contentFunc(rowFrame)
+            return rowFrame
+        end
+
+        -- ===== 右側內容 =====
+        local function showContent(index)
+            contentFrame:ClearAllChildren()
+            for i,b in ipairs(buttons) do
+                b.Indicator.Visible = (i==index)
+            end
+            
+            if index == 1 then
+                    local y = 10
+-- ===== 彩虹大標題 =====
+local mainTitle = Instance.new("TextLabel")
+mainTitle.Size = UDim2.new(1,-20,0,60)
+mainTitle.Position = UDim2.new(0,10,0,y)
+mainTitle.BackgroundTransparency = 1
+mainTitle.Text = "自動"
+mainTitle.Font = Enum.Font.SourceSansBold
+mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+mainTitle.TextSize = 40      -- ★★★ 在這裡改字大小 ★★★
+mainTitle.Parent = contentFrame
+
+        y = y + 60
+
+-- 彩虹效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+
+local AutoBuso = true -- 初始狀態 ON
+
+createOptionRow(contentFrame, y, "自動武裝色", function(row) 
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0, 60, 0.5, 0)
+    switchBg.Position = UDim2.new(1, -70, 0.25, 0)
+    switchBg.BackgroundColor3 = AutoBuso 
+        and Color3.fromRGB(0, 200, 0) 
+        or Color3.fromRGB(100, 100, 100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0, 20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 28, 1, 0)
+    knob.Position = AutoBuso 
+        and UDim2.new(1, -28, 0, 0) 
+        or UDim2.new(0, 0, 0, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0, 20)
+
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1, 0, 1, 0)
+    button.BackgroundTransparency = 1
+    button.Text = ""
+    button.Parent = switchBg
+
+    button.MouseButton1Click:Connect(function()
+        AutoBuso = not AutoBuso
+
+        -- 視覺更新
+        switchBg.BackgroundColor3 = AutoBuso 
+            and Color3.fromRGB(0, 200, 0)
+            or Color3.fromRGB(100, 100, 100)
+
+        knob:TweenPosition(
+            AutoBuso and UDim2.new(1, -28, 0, 0) or UDim2.new(0, 0, 0, 0),
+            Enum.EasingDirection.Out,
+            Enum.EasingStyle.Quad,
+            0.15,
+            true
+        )
+    end)
+end)
+
+-- 自動武裝色邏輯
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Player = Players.LocalPlayer
+local CommF = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CommF_")
+
+task.spawn(function()
+    while task.wait(1) do
+        if AutoBuso then
+            pcall(function()
+                if Player.Character and not Player.Character:FindFirstChild("HasBuso") then
+                    CommF:InvokeServer("Buso")
+                end
+            end)
+        end
+    end
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "自動v3", function(row)
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0, 60, 0.5, 0)
+    switchBg.Position = UDim2.new(1, -70, 0.25, 0)
+    switchBg.BackgroundColor3 = Scripts["自動v3"].Enabled and Color3.fromRGB(0, 200, 0) or Color3.fromRGB(100, 100, 100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0, 20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 28, 1, 0)
+    knob.Position = Scripts["自動v3"].Enabled and UDim2.new(1, -28, 0, 0) or UDim2.new(0, 0, 0, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0, 20)
+
+    -- 點擊切換開關（帶滑動動畫）
+    switchBg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            Scripts["自動v3"].Enabled = not Scripts["自動v3"].Enabled
+            if Scripts["自動v3"].Enabled then
+                Scripts["自動v3"]:Func()
+            else
+                Scripts["自動v3"]:StopFunc()
+            end
+
+            -- 更新UI顏色
+            switchBg.BackgroundColor3 = Scripts["自動v3"].Enabled and Color3.fromRGB(0, 200, 0) or Color3.fromRGB(100, 100, 100)
+
+            -- Tween 滑塊滑動
+            local targetPos = Scripts["自動v3"].Enabled and UDim2.new(1, -28, 0, 0) or UDim2.new(0, 0, 0, 0)
+            local tween = TweenService:Create(knob, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = targetPos})
+            tween:Play()
+        end
+    end)
+end)
+        y = y + 60
+
+createOptionRow(contentFrame, y, "自動v4", function(row)
+
+    -- 背景
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0, 60, 0.5, 0)
+    switchBg.Position = UDim2.new(1, -70, 0.25, 0)
+    switchBg.BackgroundColor3 = V4_ENABLED
+        and Color3.fromRGB(0, 200, 0)
+        or Color3.fromRGB(100, 100, 100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0, 20)
+
+    -- 滑塊
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 28, 1, 0)
+    knob.Position = V4_ENABLED
+        and UDim2.new(1, -28, 0, 0)
+        or UDim2.new(0, 0, 0, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0, 20)
+
+    -- 點擊層
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.fromScale(1, 1)
+    button.BackgroundTransparency = 1
+    button.Text = ""
+    button.Parent = switchBg
+
+    -- ================= 點擊事件 =================
+    button.MouseButton1Click:Connect(function()
+        V4_ENABLED = not V4_ENABLED
+
+        -- 背景顏色
+        switchBg.BackgroundColor3 = V4_ENABLED
+            and Color3.fromRGB(0, 200, 0)
+            or Color3.fromRGB(100, 100, 100)
+
+        -- 滑塊動畫
+        TweenService:Create(
+            knob,
+            TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            {
+                Position = V4_ENABLED
+                    and UDim2.new(1, -28, 0, 0)
+                    or UDim2.new(0, 0, 0, 0)
+            }
+        ):Play()
+
+        -- 停止先前的循環
+        if autoV4Connection then
+            autoV4Connection:Disconnect()
+            autoV4Connection = nil
+        end
+
+        -- 如果開啟，開始循環呼叫 RemoteFunction
+        if V4_ENABLED then
+            autoV4Connection = RunService.Heartbeat:Connect(function()
+                local remote = getAwakeningRemote()
+                if remote then
+                    remote:InvokeServer(true)
+                end
+            end)
+        end
+    end)
+end)
+
+y = y + 60
+
+            elseif index == 2 then
+                    local y = 10
+-- ===== 彩虹大標題 =====
+local mainTitle = Instance.new("TextLabel")
+mainTitle.Size = UDim2.new(1,-20,0,60)
+mainTitle.Position = UDim2.new(0,10,0,y)
+mainTitle.BackgroundTransparency = 1
+mainTitle.Text = "通用"
+mainTitle.Font = Enum.Font.SourceSansBold
+mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+mainTitle.TextSize = 40      -- ★★★ 在這裡改字大小 ★★★
+mainTitle.Parent = contentFrame
+
+-- 彩虹效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+y = y + 60 -- 下一個選項的 y 位置
+
+        -- 建立 ESP 滑動開關
+        createOptionRow(contentFrame, y, "ESP", function(row)
+            local switchBg = Instance.new("Frame")
+            switchBg.Size = UDim2.new(0,60,0.5,0)
+            switchBg.Position = UDim2.new(1,-70,0.25,0)
+            switchBg.BackgroundColor3 = ESP_ENABLED and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)
+            switchBg.BorderSizePixel = 0
+            switchBg.Parent = row
+            Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0,20)
+
+            local knob = Instance.new("Frame")
+            knob.Size = UDim2.new(0,28,1,0)
+            knob.Position = ESP_ENABLED and UDim2.new(1,-28,0,0) or UDim2.new(0,0,0,0)
+            knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+            knob.BorderSizePixel = 0
+            knob.Parent = switchBg
+            Instance.new("UICorner", knob).CornerRadius = UDim.new(0,20)
+
+            local function toggleESP()
+                ESP_ENABLED = not ESP_ENABLED
+                if ESP_ENABLED then
+                    knob:TweenPosition(UDim2.new(1,-28,0,0),"Out","Quad",0.2,true)
+                    switchBg.BackgroundColor3 = Color3.fromRGB(0,200,0)
+                else
+                    knob:TweenPosition(UDim2.new(0,0,0,0),"Out","Quad",0.2,true)
+                    switchBg.BackgroundColor3 = Color3.fromRGB(100,100,100)
+                end
+
+                -- 創建或移除 ESP
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if ESP_ENABLED then createESP(p) else removeESP(p) end
+                end
+            end
+
+            switchBg.InputBegan:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                    toggleESP()
+                end
+            end)
+        end)
+        y = y + 60
+        
+        -- ================= Noclip =================
+        createOptionRow(contentFrame, y, "穿牆", function(row)
+            local switchBg = Instance.new("Frame")
+            switchBg.Size = UDim2.new(0,60,0.5,0)
+            switchBg.Position = UDim2.new(1,-70,0.25,0)
+            switchBg.BackgroundColor3 = NOCLIP_ENABLED and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)
+            switchBg.BorderSizePixel = 0
+            switchBg.Parent = row
+            Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0,20)
+
+            local knob = Instance.new("Frame")
+            knob.Size = UDim2.new(0,28,1,0)
+            knob.Position = NOCLIP_ENABLED and UDim2.new(1,-28,0,0) or UDim2.new(0,0,0,0)
+            knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+            knob.BorderSizePixel = 0
+            knob.Parent = switchBg
+            Instance.new("UICorner", knob).CornerRadius = UDim.new(0,20)
+
+            local function toggleNoclip()
+                NOCLIP_ENABLED = not NOCLIP_ENABLED
+                setNoclipState(NOCLIP_ENABLED)
+
+                if NOCLIP_ENABLED then
+                    knob:TweenPosition(UDim2.new(1,-28,0,0),"Out","Quad",0.2,true)
+                    switchBg.BackgroundColor3 = Color3.fromRGB(0,200,0)
+                else
+                    knob:TweenPosition(UDim2.new(0,0,0,0),"Out","Quad",0.2,true)
+                    switchBg.BackgroundColor3 = Color3.fromRGB(100,100,100)
+                end
+            end
+
+            switchBg.InputBegan:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                    toggleNoclip()
+                end
+            end)
+        end)
+
+        y = y + 60
+
+createOptionRow(contentFrame, y, "水上行走", function(row)
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0, 60, 0.5, 0)
+    switchBg.Position = UDim2.new(1, -70, 0.25, 0)
+    switchBg.BackgroundColor3 = waterWalkEnabled and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0, 20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 28, 1, 0)
+    knob.Position = waterWalkEnabled and UDim2.new(1, -28, 0, 0) or UDim2.new(0, 0, 0, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0, 20)
+
+    -- 點擊切換
+    switchBg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            waterWalkEnabled = not waterWalkEnabled
+            switchBg.BackgroundColor3 = waterWalkEnabled and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)
+            knob:TweenPosition(waterWalkEnabled and UDim2.new(1, -28, 0, 0) or UDim2.new(0, 0, 0, 0), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
+
+            if waterWalkEnabled then
+                createPlatform()
+            elseif platform then
+                platform:Destroy()
+                platform = nil
+            end
+        end
+    end)
+end)
+
+-- 持續更新平台
+RunService.RenderStepped:Connect(function()
+    if waterWalkEnabled then
+        updatePlatform()
+    end
+end)
+
+y = y + 60
+
+-- 碰撞箱直接控制，不需要按鈕
+createOptionRow(contentFrame, y, "碰撞箱:", function(row)
+
+    local inputBox = Instance.new("TextBox")
+    inputBox.Size = UDim2.new(0,80,0.6,0)
+    inputBox.Position = UDim2.new(0,130,0.2,0)
+    inputBox.BackgroundColor3 = Color3.fromRGB(70,70,70)
+    inputBox.TextColor3 = Color3.fromRGB(255,255,255)
+    inputBox.TextScaled = true
+    inputBox.ClearTextOnFocus = false
+    inputBox.Text = tostring(Hitbox.Size)
+    inputBox.Parent = row
+
+    local slider = Instance.new("Frame")
+    slider.Size = UDim2.new(0,200,0.3,0)
+    slider.Position = UDim2.new(0,220,0.35,0)
+    slider.BackgroundColor3 = Color3.fromRGB(100,100,100)
+    slider.Parent = row
+
+                    local maxLabel = Instance.new("TextLabel")
+                    maxLabel.Size = UDim2.new(0,80,1,0)
+                    maxLabel.Position = UDim2.new(0,430,0,0)
+                    maxLabel.BackgroundTransparency = 1
+                    maxLabel.Text = "(max:20)"
+                    maxLabel.TextColor3 = Color3.fromRGB(200,200,200)
+                    maxLabel.TextScaled = true
+                    maxLabel.TextXAlignment = Enum.TextXAlignment.Left
+                    maxLabel.Parent = row
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(Hitbox.Size / 20,0,1,0)
+    fill.BackgroundColor3 = Color3.fromRGB(255,150,0)
+    fill.Parent = slider
+
+    local MAX = 20
+    local dragging = false
+
+    slider.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+        end
+    end)
+
+    slider.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+
+    slider.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+            local x = math.clamp(
+                i.Position.X - slider.AbsolutePosition.X,
+                0,
+                slider.AbsoluteSize.X
+            )
+            local val = math.floor((x / slider.AbsoluteSize.X) * MAX)
+            Hitbox.Size = val
+            inputBox.Text = tostring(val)
+            fill.Size = UDim2.new(val/MAX,0,1,0)
+
+            -- 直接應用碰撞箱變化
+            Hitbox:ApplyAll()
+        end
+    end)
+
+    inputBox.FocusLost:Connect(function()
+        local val = tonumber(inputBox.Text)
+        if val then
+            val = math.clamp(val,1,MAX)
+            Hitbox.Size = val
+            fill.Size = UDim2.new(val/MAX,0,1,0)
+            inputBox.Text = tostring(val)
+
+            Hitbox:ApplyAll()
+        end
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "相機縮放:", function(row)
+    local inputBox = Instance.new("TextBox")
+    inputBox.Size = UDim2.new(0,80,0.6,0)
+    inputBox.Position = UDim2.new(0,130,0.2,0)
+    inputBox.BackgroundColor3 = Color3.fromRGB(70,70,70)
+    inputBox.TextColor3 = Color3.fromRGB(255,255,255)
+    inputBox.TextScaled = true
+    inputBox.ClearTextOnFocus = false
+    inputBox.Text = tostring(CameraController.CurrentZoom)
+    inputBox.Parent = row
+
+    local slider = Instance.new("Frame")
+    slider.Size = UDim2.new(0,200,0.3,0)
+    slider.Position = UDim2.new(0,220,0.35,0)
+    slider.BackgroundColor3 = Color3.fromRGB(100,100,100)
+    slider.Parent = row
+
+    local maxLabel = Instance.new("TextLabel")
+    maxLabel.Size = UDim2.new(0,80,1,0)
+    maxLabel.Position = UDim2.new(0,430,0,0)
+    maxLabel.BackgroundTransparency = 1
+    maxLabel.Text = "(max:"..CameraController.MaxZoom..")"
+    maxLabel.TextColor3 = Color3.fromRGB(200,200,200)
+    maxLabel.TextScaled = true
+    maxLabel.TextXAlignment = Enum.TextXAlignment.Left
+    maxLabel.Parent = row
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(CameraController.CurrentZoom / CameraController.MaxZoom,0,1,0)
+    fill.BackgroundColor3 = Color3.fromRGB(255,150,0)
+    fill.Parent = slider
+
+    local MAX = CameraController.MaxZoom
+    local dragging = false
+
+    slider.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
+    end)
+    slider.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    slider.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+            local x = math.clamp(i.Position.X - slider.AbsolutePosition.X,0,slider.AbsoluteSize.X)
+            local val = math.floor((x / slider.AbsoluteSize.X) * MAX / CameraController.Step) * CameraController.Step
+            CameraController:SetZoom(val)
+            inputBox.Text = tostring(val)
+            fill.Size = UDim2.new(x / slider.AbsoluteSize.X,0,1,0)
+        end
+    end)
+
+    -- 也可以監聽文字框直接改值
+    inputBox.FocusLost:Connect(function(enterPressed)
+        local val = tonumber(inputBox.Text)
+        if val then
+            CameraController:SetZoom(val)
+            fill.Size = UDim2.new(CameraController.CurrentZoom / MAX,0,1,0)
+            inputBox.Text = tostring(CameraController.CurrentZoom)
+        end
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "Remove Lava", function(row) 
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0) 
+    button.Position = UDim2.new(1, -70, 0.15, 0) 
+    button.BackgroundTransparency = 1 
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255, 255, 255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local clicked = false
+
+    button.MouseButton1Click:Connect(function()
+        if clicked then return end
+        clicked = true
+
+        -- Tween 動畫效果
+        local tweenService = game:GetService("TweenService")
+        local shrinkInfo = TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        local shrinkGoal = {Size = UDim2.new(0, 30, 0.7, 0)}
+        local growGoal = {Size = UDim2.new(0, 40, 0.7, 0)}
+        local shrinkTween = tweenService:Create(button, shrinkInfo, shrinkGoal)
+        local growTween = tweenService:Create(button, shrinkInfo, growGoal)
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function()
+            growTween:Play()
+        end)
+
+        local flashInfo = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        local flashGoal = {TextColor3 = Color3.fromRGB(255, 255, 0)}
+        local restoreGoal = {TextColor3 = Color3.fromRGB(255, 255, 255)}
+        local flashTween = tweenService:Create(button, flashInfo, flashGoal)
+        local restoreTween = tweenService:Create(button, flashInfo, restoreGoal)
+        flashTween:Play()
+        flashTween.Completed:Connect(function()
+            restoreTween:Play()
+        end)
+
+        -- 按鈕視覺更新
+        button.TextColor3 = Color3.fromRGB(150, 150, 150)
+        button.TextTransparency = 0.5
+
+        -- 呼叫核心功能
+        removeLava()
+    end)
+end)
+
+y = y + 60
+
+        elseif index == 3 then
+                    local y = 10
+-- ===== 彩虹大標題 =====
+local mainTitle = Instance.new("TextLabel")
+mainTitle.Size = UDim2.new(1,-20,0,60)
+mainTitle.Position = UDim2.new(0,10,0,y)
+mainTitle.BackgroundTransparency = 1
+mainTitle.Text = "Server"
+mainTitle.Font = Enum.Font.SourceSansBold
+mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+mainTitle.TextSize = 40      -- ★★★ 在這裡改字大小 ★★★
+mainTitle.Parent = contentFrame
+
+-- 彩虹效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+y = y + 60 -- 下一個選項的 y 位置
+
+-- ===== Hop Server =====
+createOptionRow(contentFrame, y, "切換伺服器", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local TweenService = game:GetService("TweenService")
+    local TeleportService = game:GetService("TeleportService")
+    local Players = game:GetService("Players")
+    local LocalPlayer = Players.LocalPlayer
+    local targetPlaceId = game.PlaceId
+
+    local isTeleporting = false
+
+    local function TeleportOnce()
+        if isTeleporting then return end
+        isTeleporting = true
+
+        pcall(function()
+            TeleportService:Teleport(targetPlaceId, LocalPlayer)
+        end)
+    end
+
+    button.MouseButton1Click:Connect(function()
+        -- 點擊動畫
+        local shrinkTween = TweenService:Create(
+            button,
+            TweenInfo.new(0.1),
+            {Size = UDim2.new(0, 30, 0.7, 0)}
+        )
+        local growTween = TweenService:Create(
+            button,
+            TweenInfo.new(0.1),
+            {Size = UDim2.new(0, 40, 0.7, 0)}
+        )
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function()
+            growTween:Play()
+        end)
+
+        local flashTween = TweenService:Create(
+            button,
+            TweenInfo.new(0.15),
+            {TextColor3 = Color3.fromRGB(255, 255, 0)}
+        )
+        local restoreTween = TweenService:Create(
+            button,
+            TweenInfo.new(0.15),
+            {TextColor3 = Color3.fromRGB(255, 255, 255)}
+        )
+        flashTween:Play()
+        flashTween.Completed:Connect(function()
+            restoreTween:Play()
+        end)
+
+        -- 功能：重新傳送到同一 Place（重新進入）
+        task.spawn(function()
+            if not LocalPlayer.Character then
+                LocalPlayer.CharacterAdded:Wait()
+            end
+            task.wait(1)
+            TeleportOnce()
+        end)
+    end)
+end)
+
+y = y + 60
+
+-- ===== Rejoin =====
+createOptionRow(contentFrame, y, "重進伺服器", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+    local player = game.Players.LocalPlayer
+    local TeleportService = game:GetService("TeleportService")
+
+    button.MouseButton1Click:Connect(function()
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            TeleportService:Teleport(game.PlaceId, player)
+        end)
+    end)
+end)
+
+y = y + 60
+
+-- ===== Join Low Player Server =====
+createOptionRow(contentFrame, y, "加入到少人伺服器", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+    local player = game.Players.LocalPlayer
+    local TeleportService = game:GetService("TeleportService")
+    local HttpService = game:GetService("HttpService")
+    local PlaceId = game.PlaceId
+
+    button.MouseButton1Click:Connect(function()
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            local AllServers = {}
+            local success, servers = pcall(function()
+                return HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/"..PlaceId.."/servers/Public?sortOrder=Asc&limit=100"))
+            end)
+            if success and servers and servers.data then
+                for _, s in ipairs(servers.data) do
+                    if s.id ~= game.JobId and s.playing < s.maxPlayers then
+                        table.insert(AllServers, s.id)
+                    end
+                end
+            end
+            if #AllServers > 0 then
+                local randId = AllServers[math.random(1,#AllServers)]
+                TeleportService:TeleportToPlaceInstance(PlaceId, randId, player)
+            end
+        end)
+    end)
+end)
+
+y = y + 60
+
+elseif index == 4 then
+    local y = 10
+
+    -- ===== 彩虹大標題 =====
+    local mainTitle = Instance.new("TextLabel")
+    mainTitle.Size = UDim2.new(1,-20,0,60)
+    mainTitle.Position = UDim2.new(0,10,0,y)
+    mainTitle.BackgroundTransparency = 1
+    mainTitle.Text = "狀態"
+    mainTitle.Font = Enum.Font.SourceSansBold
+    mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+    mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+    mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+    mainTitle.TextSize = 40
+    mainTitle.Parent = contentFrame
+
+    -- 彩虹效果
+    local hue = 0
+    RunService.RenderStepped:Connect(function(dt)
+        hue = (hue + dt/2) % 1
+        mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+    end)
+
+    y = y + 60 -- 下一個選項的 y 位置
+
+-- ================= ServerInfoGUI (貼齊左右 + 圓角 + 灰色) =================
+local frame = Instance.new("Frame", contentFrame)
+frame.Size = UDim2.new(1, 0, 0, 400) -- 減少高度，移除 PlaceId
+frame.Position = UDim2.new(0, 0, 0, y)
+frame.BackgroundColor3 = Color3.fromRGB(50,50,50)
+frame.BorderSizePixel = 0
+
+local uicorner = Instance.new("UICorner", frame)
+uicorner.CornerRadius = UDim.new(0, 20)
+
+local function createLabel(yPos)
+    local l = Instance.new("TextLabel", frame)
+    l.Size = UDim2.new(1, -30, 0, 38)
+    l.Position = UDim2.new(0, 15, 0, yPos)
+    l.BackgroundTransparency = 1
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Font = Enum.Font.SourceSans
+    l.TextSize = 25
+    l.TextColor3 = Color3.new(1,1,1)
+    return l
+end
+
+-- 原本的 Label（往上調整位置）
+local playerLabel = createLabel(50)
+local timeLabel = createLabel(95)
+local pingLabel = createLabel(140)
+
+-- ================= 新增 FPS / Discord / GameTime Label =================
+local fpsLabel = createLabel(185)
+local gameTimeLabel = createLabel(230)
+local discordLabel = createLabel(275)
+discordLabel.Text = "https://discord.gg/ptec6vhQtf" -- 初始文字
+
+-- Discord 複製按鈕
+local discordBtn = Instance.new("TextButton", frame)
+discordBtn.Size = UDim2.new(0, 180, 0, 33)
+discordBtn.Position = UDim2.new(1, -195, 0, 275)
+discordBtn.Text = "Copy"
+discordBtn.Font = Enum.Font.SourceSansBold
+discordBtn.TextSize = 20
+discordBtn.MouseButton1Click:Connect(function()
+    setclipboard("https://discord.gg/ptec6vhQtf") -- 填你的 Discord 連結
+    print("Discord Link Copied!")
+end)
+
+-- ================= Update =================
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+RunService.RenderStepped:Connect(function()
+    -- 玩家數
+    playerLabel.Text = string.format("Players: %d / %d", #Players:GetPlayers(), Players.MaxPlayers)
+    
+    -- 本地時間
+    local t = os.date("*t")
+    timeLabel.Text = string.format(
+        "Local Time: %04d-%02d-%02d %02d:%02d",
+        t.year, t.month, t.day, t.hour, t.min
+    )
+    
+    -- Ping
+    local ping = LocalPlayer:GetNetworkPing() * 1000
+    pingLabel.Text = string.format("Ping: %.0f ms", ping)
+
+    -- FPS
+    local fps = workspace:GetRealPhysicsFPS()
+    fpsLabel.Text = string.format("FPS: %.0f", fps)
+
+    -- Game Time
+    local GameTime = math.floor(workspace.DistributedGameTime + 0.5)
+    local Hour = math.floor(GameTime / 60 ^ 2) % 24
+    local Minute = math.floor(GameTime / 60 ^ 1) % 60
+    local Second = math.floor(GameTime / 60 ^ 0) % 60
+    gameTimeLabel.Text = string.format("Game Time: %02d:%02d:%02d", Hour, Minute, Second)
+end)
+
+            elseif index == 5 then
+                    local y = 10
+
+-- ===== 彩虹大標題 =====
+local mainTitle = Instance.new("TextLabel")
+mainTitle.Size = UDim2.new(1,-20,0,60)
+mainTitle.Position = UDim2.new(0,10,0,y)
+mainTitle.BackgroundTransparency = 1
+mainTitle.Text = "PVP"
+mainTitle.Font = Enum.Font.SourceSansBold
+mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+mainTitle.TextSize = 40      -- ★★★ 在這裡改字大小 ★★★
+mainTitle.Parent = contentFrame
+
+-- 彩虹效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+y = y + 60 -- 下一個選項的 y 位置
+
+                -- 自動攻擊開關
+                createOptionRow(contentFrame, y, "自動攻擊", function(row)
+                    local switchBg = Instance.new("Frame")
+                    switchBg.Size = UDim2.new(0,60,0.5,0)
+                    switchBg.Position = UDim2.new(1,-70,0.25,0)
+                    switchBg.BackgroundColor3 = Settings.AutoClick and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)
+                    switchBg.BorderSizePixel = 0
+                    switchBg.Parent = row
+                    local switchCorner = Instance.new("UICorner")
+                    switchCorner.CornerRadius = UDim.new(0,20)
+                    switchCorner.Parent = switchBg
+
+                    local knob = Instance.new("Frame")
+                    knob.Size = UDim2.new(0,28,1,0)
+                    knob.Position = Settings.AutoClick and UDim2.new(1, -28, 0, 0) or UDim2.new(0,0,0,0)
+                    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+                    knob.BorderSizePixel = 0
+                    knob.Parent = switchBg
+                    local knobCorner = Instance.new("UICorner")
+                    knobCorner.CornerRadius = UDim.new(0,20)
+                    knobCorner.Parent = knob
+
+                    local toggled = Settings.AutoClick
+                    local function toggleSwitch()
+                        toggled = not toggled
+                        Settings.AutoClick = toggled
+                        if toggled then
+                            knob:TweenPosition(UDim2.new(1,-28,0,0),"Out","Quad",0.2,true)
+                            switchBg.BackgroundColor3 = Color3.fromRGB(0,200,0)
+                        else
+                            knob:TweenPosition(UDim2.new(0,0,0,0),"Out","Quad",0.2,true)
+                            switchBg.BackgroundColor3 = Color3.fromRGB(100,100,100)
+                        end
+                    end
+                    switchBg.InputBegan:Connect(function(input)
+                        if input.UserInputType == Enum.UserInputType.MouseButton1 then toggleSwitch() end
+                    end)
+                end)
+				
+                y = y + 60
+
+				                -- 攻擊距離滑條
+                createOptionRow(contentFrame, y, "攻擊距離:", function(row)
+                    local inputBox = Instance.new("TextBox")
+                    inputBox.Size = UDim2.new(0,80,0.6,0)
+                    inputBox.Position = UDim2.new(0,130,0.2,0)
+                    inputBox.BackgroundColor3 = Color3.fromRGB(70,70,70)
+                    inputBox.TextColor3 = Color3.fromRGB(255,255,255)
+                    inputBox.TextScaled = true
+                    inputBox.ClearTextOnFocus = false
+                    inputBox.Text = tostring(Settings.Distance)
+                    inputBox.Parent = row
+
+                    local slider = Instance.new("Frame")
+                    slider.Size = UDim2.new(0,200,0.3,0)
+                    slider.Position = UDim2.new(0,220,0.35,0)
+                    slider.BackgroundColor3 = Color3.fromRGB(100,100,100)
+                    slider.Parent = row
+                    local fill = Instance.new("Frame")
+                    fill.Size = UDim2.new(Settings.Distance/1000,0,1,0)
+                    fill.BackgroundColor3 = Color3.fromRGB(255,200,0)
+                    fill.Parent = slider
+
+                    local maxLabel = Instance.new("TextLabel")
+                    maxLabel.Size = UDim2.new(0,80,1,0)
+                    maxLabel.Position = UDim2.new(0,430,0,0)
+                    maxLabel.BackgroundTransparency = 1
+                    maxLabel.Text = "(max:1000m)"
+                    maxLabel.TextColor3 = Color3.fromRGB(200,200,200)
+                    maxLabel.TextScaled = true
+                    maxLabel.TextXAlignment = Enum.TextXAlignment.Left
+                    maxLabel.Parent = row
+
+                    local dragging = false
+                    local MAX_DISTANCE = 1000
+
+                    slider.InputBegan:Connect(function(input)
+                        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
+                    end)
+                    slider.InputEnded:Connect(function(input)
+                        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+                    end)
+                    slider.InputChanged:Connect(function(input)
+                        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                            local mouseX = input.Position.X - slider.AbsolutePosition.X
+                            mouseX = math.clamp(mouseX,0,slider.AbsoluteSize.X)
+                            local distance = (mouseX/slider.AbsoluteSize.X)*MAX_DISTANCE
+                            Settings.Distance = distance
+                            inputBox.Text = tostring(math.floor(distance))
+                            fill.Size = UDim2.new(mouseX/slider.AbsoluteSize.X,0,1,0)
+                        end
+                    end)
+                    inputBox.FocusLost:Connect(function(enterPressed)
+                        if enterPressed then
+                            local val = tonumber(inputBox.Text)
+                            if val then
+                                local distance = math.clamp(val,0,MAX_DISTANCE)
+                                Settings.Distance = distance
+                                inputBox.Text = tostring(math.floor(distance))
+                                fill.Size = UDim2.new(distance/MAX_DISTANCE,0,1,0)
+                            else
+                                inputBox.Text = tostring(math.floor(Settings.Distance))
+                            end
+                        end
+                    end)
+                end)
+
+                y = y + 60
+
+createOptionRow(contentFrame, y, "Fruit M1", function(row)
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0,60,0.5,0)
+    switchBg.Position = UDim2.new(1,-70,0.25,0)
+    switchBg.BackgroundColor3 = getgenv().AUTO_ATTACK_ENABLED
+        and Color3.fromRGB(0,200,0)
+        or Color3.fromRGB(100,100,100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0,20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0,28,1,0)
+    knob.Position = getgenv().AUTO_ATTACK_ENABLED
+        and UDim2.new(1,-28,0,0)
+        or UDim2.new(0,0,0,0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0,20)
+
+    local function toggleAutoAttack()
+        getgenv().AUTO_ATTACK_ENABLED = not getgenv().AUTO_ATTACK_ENABLED
+
+        if getgenv().AUTO_ATTACK_ENABLED then
+            knob:TweenPosition(
+                UDim2.new(1,-28,0,0),
+                "Out","Quad",0.2,true
+            )
+            switchBg.BackgroundColor3 = Color3.fromRGB(0,200,0)
+        else
+            knob:TweenPosition(
+                UDim2.new(0,0,0,0),
+                "Out","Quad",0.2,true
+            )
+            switchBg.BackgroundColor3 = Color3.fromRGB(100,100,100)
+        end
+    end
+
+    switchBg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            toggleAutoAttack()
+        end
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "Fly to Player", function(row)
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0,60,0.5,0)
+    switchBg.Position = UDim2.new(1,-70,0.25,0)
+    switchBg.BackgroundColor3 = Color3.fromRGB(100,100,100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0,20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0,28,1,0)
+    knob.Position = UDim2.new(0,0,0,0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0,20)
+
+    -- TweenService
+    local TweenService = game:GetService("TweenService")
+
+    -- 更新 UI
+    local function updateUI()
+        switchBg.BackgroundColor3 = FlyEnabled and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)
+        TweenService:Create(
+            knob,
+            TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            {Position = FlyEnabled and UDim2.new(1,-28,0,0) or UDim2.new(0,0,0,0)}
+        ):Play()
+    end
+
+    local function setState(state)
+        FlyEnabled = state
+        NoclipEnabled = state
+        if state then EnableFly() else DisableFly() end
+        updateUI()
+    end
+
+    -- 初始化 UI
+    updateUI()
+
+    -- TextButton 覆蓋層
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.fromScale(1,1)
+    button.BackgroundTransparency = 1
+    button.Text = ""
+    button.Parent = switchBg
+
+    button.MouseButton1Click:Connect(function()
+        setState(not FlyEnabled)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "視角鎖定", function(row)
+
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0,60,0.5,0)
+    switchBg.Position = UDim2.new(1,-70,0.25,0)
+    switchBg.BackgroundColor3 = Color3.fromRGB(100,100,100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0,20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0,28,1,0)
+    knob.Position = UDim2.new(0,0,0,0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0,20)
+
+    local TweenService = game:GetService("TweenService")
+
+    local function updateUI()
+        switchBg.BackgroundColor3 =
+            CamlockEnabled and Color3.fromRGB(0,200,0)
+            or Color3.fromRGB(100,100,100)
+
+        TweenService:Create(
+            knob,
+            TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            {
+                Position = CamlockEnabled
+                    and UDim2.new(1,-28,0,0)
+                    or UDim2.new(0,0,0,0)
+            }
+        ):Play()
+    end
+
+    local function setState(state)
+        CamlockEnabled = state
+        updateUI()
+    end
+
+    updateUI()
+
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.fromScale(1,1)
+    button.BackgroundTransparency = 1
+    button.Text = ""
+    button.Parent = switchBg
+
+    button.MouseButton1Click:Connect(function()
+        setState(not CamlockEnabled)
+    end)
+
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "選擇玩家", function(row)
+
+    local Players = game:GetService("Players")
+    local LocalPlayer = Players.LocalPlayer
+
+    local dropdown = Instance.new("TextButton")
+    dropdown.Size = UDim2.new(0,160,0.6,0)
+    dropdown.Position = UDim2.new(1,-170,0.2,0)
+    dropdown.Text = TargetPlayer and TargetPlayer.Name or "點選"
+    dropdown.BackgroundColor3 = Color3.fromRGB(60,60,60)
+    dropdown.TextColor3 = Color3.new(1,1,1)
+    dropdown.Font = Enum.Font.SourceSans
+    dropdown.TextSize = 16
+    dropdown.ZIndex = 10
+    dropdown.Parent = row
+    Instance.new("UICorner", dropdown)
+
+    -- ▼▼ 重點：list 直接掛在 row ▼▼
+    local list = Instance.new("Frame")
+    list.Size = UDim2.new(0,160,0,0)
+    list.Position = UDim2.new(1,-170,1,4)
+    list.BackgroundColor3 = Color3.fromRGB(40,40,40)
+    list.Visible = false
+    list.ClipsDescendants = true
+    list.ZIndex = 20
+    list.Parent = row
+    Instance.new("UICorner", list)
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0,2)
+    layout.Parent = list
+
+    local function refreshPlayers()
+
+        for _,c in ipairs(list:GetChildren()) do
+            if c:IsA("TextButton") then
+                c:Destroy()
+            end
+        end
+
+        for _,plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then
+
+                local btn = Instance.new("TextButton")
+                btn.Size = UDim2.new(1,0,0,30)
+                btn.Text = plr.Name
+                btn.BackgroundColor3 = Color3.fromRGB(70,70,70)
+                btn.TextColor3 = Color3.new(1,1,1)
+                btn.Font = Enum.Font.SourceSans
+                btn.TextSize = 15
+                btn.ZIndex = 21
+                btn.Parent = list
+
+                btn.MouseButton1Click:Connect(function()
+                    TargetPlayer = plr
+                    dropdown.Text = plr.Name
+                    list.Visible = false
+
+                    list:TweenSize(
+                        UDim2.new(0,160,0,0),
+                        "Out","Quad",0.15,true
+                    )
+                end)
+            end
+        end
+
+        task.wait()
+        list.Size = UDim2.new(0,160,0,layout.AbsoluteContentSize.Y)
+    end
+
+    dropdown.MouseButton1Click:Connect(function()
+
+        refreshPlayers()
+        list.Visible = not list.Visible
+
+        list:TweenSize(
+            list.Visible
+                and UDim2.new(0,160,0,layout.AbsoluteContentSize.Y)
+                or UDim2.new(0,160,0,0),
+            "Out","Quad",0.15,true
+        )
+    end)
+
+    Players.PlayerAdded:Connect(refreshPlayers)
+    Players.PlayerRemoving:Connect(refreshPlayers)
+
+end)
+
+y = y + 60
+
+            elseif index == 6 then
+                    local y = 10
+-- ===== 彩虹大標題 =====
+local mainTitle = Instance.new("TextLabel")
+mainTitle.Size = UDim2.new(1,-20,0,60)
+mainTitle.Position = UDim2.new(0,10,0,y)
+mainTitle.BackgroundTransparency = 1
+mainTitle.Text = "Farm Setting"
+mainTitle.Font = Enum.Font.SourceSansBold
+mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+mainTitle.TextSize = 40      -- ★★★ 在這裡改字大小 ★★★
+mainTitle.Parent = contentFrame
+
+-- 彩虹效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+y = y + 60 -- 下一個選項的 y 位置
+
+createOptionRow(contentFrame, y, "Auto Equip", function(row)
+    local FlyEnabled = autoEquipEnabled -- 初始 OFF
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0,60,0.5,0)
+    switchBg.Position = UDim2.new(1,-70,0.25,0)
+    switchBg.BackgroundColor3 = FlyEnabled and Color3.fromRGB(0,255,0) or Color3.fromRGB(100,100,100) -- ON 最亮綠，OFF 灰色
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0,20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0,28,1,0)
+    knob.Position = FlyEnabled and UDim2.new(1,-28,0,0) or UDim2.new(0,0,0,0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0,20)
+
+    local TweenService = game:GetService("TweenService")
+    local function updateUI()
+        switchBg.BackgroundColor3 = FlyEnabled and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)
+        TweenService:Create(knob, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            {Position = FlyEnabled and UDim2.new(1,-28,0,0) or UDim2.new(0,0,0,0)}
+        ):Play()
+    end
+
+    local function setState(state)
+        FlyEnabled = state
+        autoEquipEnabled = state
+        if state then equipByType(selectedType) end
+        updateUI()
+    end
+
+    updateUI()
+
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.fromScale(1,1)
+    button.BackgroundTransparency = 1
+    button.Text = ""
+    button.Parent = switchBg
+
+    button.MouseButton1Click:Connect(function()
+        setState(not FlyEnabled)
+    end)
+end)
+y = y + 60
+
+
+
+    -- 武器選擇下拉
+-- 武器選擇下拉
+createOptionRow(contentFrame, y, "選擇武器類型", function(row)
+
+    local dropdown = Instance.new("TextButton")
+    dropdown.Size = UDim2.new(0,160,0.6,0)
+    dropdown.Position = UDim2.new(1,-170,0.2,0)
+    dropdown.Text = selectedType
+    dropdown.BackgroundColor3 = Color3.fromRGB(60,60,60)
+    dropdown.TextColor3 = Color3.new(1,1,1)
+    dropdown.Font = Enum.Font.SourceSans
+    dropdown.TextSize = 16
+    dropdown.ZIndex = 10
+    dropdown.Parent = row
+    Instance.new("UICorner", dropdown)
+
+    -- ▼▼ 重點：list 改成 row 子物件 ▼▼
+    local list = Instance.new("Frame")
+    list.Size = UDim2.new(0,160,0,0)
+    list.Position = UDim2.new(1,-170,1,4)
+    list.BackgroundColor3 = Color3.fromRGB(40,40,40)
+    list.Visible = false
+    list.ClipsDescendants = true
+    list.ZIndex = 20
+    list.Parent = row
+    Instance.new("UICorner", list)
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0,2)
+    layout.Parent = list
+
+    local weaponTypes = {"Melee", "Blox Fruit", "Sword", "Gun"}
+
+    local function refreshWeapons()
+        for _,c in ipairs(list:GetChildren()) do
+            if c:IsA("TextButton") then
+                c:Destroy()
+            end
+        end
+
+        for _,typeName in ipairs(weaponTypes) do
+            local btn = Instance.new("TextButton")
+            btn.Size = UDim2.new(1,0,0,30)
+            btn.Text = typeName
+            btn.BackgroundColor3 = Color3.fromRGB(70,70,70)
+            btn.TextColor3 = Color3.new(1,1,1)
+            btn.Font = Enum.Font.SourceSans
+            btn.TextSize = 15
+            btn.ZIndex = 21
+            btn.Parent = list
+
+            btn.MouseButton1Click:Connect(function()
+                selectedType = typeName
+                dropdown.Text = typeName
+                list.Visible = false
+
+                list:TweenSize(
+                    UDim2.new(0,160,0,0),
+                    "Out","Quad",0.15,true
+                )
+
+                if autoEquipEnabled then
+                    equipByType(selectedType)
+                end
+            end)
+        end
+
+        task.wait()
+        list.Size = UDim2.new(0,160,0,layout.AbsoluteContentSize.Y)
+    end
+
+    dropdown.MouseButton1Click:Connect(function()
+        refreshWeapons()
+        list.Visible = not list.Visible
+
+        list:TweenSize(
+            list.Visible
+                and UDim2.new(0,160,0,layout.AbsoluteContentSize.Y)
+                or UDim2.new(0,160,0,0),
+            "Out","Quad",0.15,true
+        )
+    end)
+
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "TP to NPC", function(row)
+
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0,60,0.5,0)
+    switchBg.Position = UDim2.new(1,-70,0.25,0)
+    switchBg.BackgroundColor3 = FlyTP.Enabled
+        and Color3.fromRGB(0,200,0)
+        or Color3.fromRGB(100,100,100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0,20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0,28,1,0)
+    knob.Position = FlyTP.Enabled
+        and UDim2.new(1,-28,0,0)
+        or UDim2.new(0,0,0,0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0,20)
+
+    local function toggle()
+        FlyTP.Enabled = not FlyTP.Enabled
+
+        if FlyTP.Enabled then
+            knob:TweenPosition(UDim2.new(1,-28,0,0),"Out","Quad",0.2,true)
+            switchBg.BackgroundColor3 = Color3.fromRGB(0,200,0)
+            startFly()
+        else
+            knob:TweenPosition(UDim2.new(0,0,0,0),"Out","Quad",0.2,true)
+            switchBg.BackgroundColor3 = Color3.fromRGB(100,100,100)
+            stopFly()
+        end
+    end
+
+    switchBg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            toggle()
+        end
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "Bring NPC", function(row)
+
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0,60,0.5,0)
+    switchBg.Position = UDim2.new(1,-70,0.25,0)
+    switchBg.BackgroundColor3 = BringNPC.Enabled
+        and Color3.fromRGB(0,200,0)
+        or Color3.fromRGB(100,100,100)
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0,20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0,28,1,0)
+    knob.Position = BringNPC.Enabled
+        and UDim2.new(1,-28,0,0)
+        or UDim2.new(0,0,0,0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0,20)
+
+    local function toggle()
+        BringNPC.Enabled = not BringNPC.Enabled
+
+        if BringNPC.Enabled then
+            knob:TweenPosition(UDim2.new(1,-28,0,0),"Out","Quad",0.2,true)
+            switchBg.BackgroundColor3 = Color3.fromRGB(0,200,0)
+            startBring()
+        else
+            knob:TweenPosition(UDim2.new(0,0,0,0),"Out","Quad",0.2,true)
+            switchBg.BackgroundColor3 = Color3.fromRGB(100,100,100)
+            stopBring()
+        end
+    end
+
+    switchBg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            toggle()
+        end
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "飛行高度:", function(row)
+    local inputBox = Instance.new("TextBox")
+    inputBox.Size = UDim2.new(0,80,0.6,0)
+    inputBox.Position = UDim2.new(0,130,0.2,0)
+    inputBox.BackgroundColor3 = Color3.fromRGB(70,70,70)
+    inputBox.TextColor3 = Color3.fromRGB(255,255,255)
+    inputBox.TextScaled = true
+    inputBox.ClearTextOnFocus = false
+    inputBox.Text = tostring(FlyTP.HoverHeight)
+    inputBox.Parent = row
+
+    local slider = Instance.new("Frame")
+    slider.Size = UDim2.new(0,200,0.3,0)
+    slider.Position = UDim2.new(0,220,0.35,0)
+    slider.BackgroundColor3 = Color3.fromRGB(100,100,100)
+    slider.Parent = row
+
+                    local maxLabel = Instance.new("TextLabel")
+                    maxLabel.Size = UDim2.new(0,80,1,0)
+                    maxLabel.Position = UDim2.new(0,430,0,0)
+                    maxLabel.BackgroundTransparency = 1
+                    maxLabel.Text = "(max:50m)"
+                    maxLabel.TextColor3 = Color3.fromRGB(200,200,200)
+                    maxLabel.TextScaled = true
+                    maxLabel.TextXAlignment = Enum.TextXAlignment.Left
+                    maxLabel.Parent = row
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(FlyTP.HoverHeight / 50,0,1,0)
+    fill.BackgroundColor3 = Color3.fromRGB(255,150,0)
+    fill.Parent = slider
+
+    local MAX = 50
+    local dragging = false
+
+    slider.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
+    end)
+    slider.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    slider.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+            local x = math.clamp(i.Position.X - slider.AbsolutePosition.X,0,slider.AbsoluteSize.X)
+            local val = math.floor((x / slider.AbsoluteSize.X) * MAX)
+            FlyTP.HoverHeight = val
+            inputBox.Text = tostring(val)
+            fill.Size = UDim2.new(x / slider.AbsoluteSize.X,0,1,0)
+        end
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "搜尋範圍:", function(row)
+    local inputBox = Instance.new("TextBox")
+    inputBox.Size = UDim2.new(0,80,0.6,0)
+    inputBox.Position = UDim2.new(0,130,0.2,0)
+    inputBox.BackgroundColor3 = Color3.fromRGB(70,70,70)
+    inputBox.TextColor3 = Color3.fromRGB(255,255,255)
+    inputBox.TextScaled = true
+    inputBox.ClearTextOnFocus = false
+    inputBox.Text = tostring(FlyTP.SearchRange)
+    inputBox.Parent = row
+
+    local slider = Instance.new("Frame")
+    slider.Size = UDim2.new(0,200,0.3,0)
+    slider.Position = UDim2.new(0,220,0.35,0)
+    slider.BackgroundColor3 = Color3.fromRGB(100,100,100)
+    slider.Parent = row
+
+                    local maxLabel = Instance.new("TextLabel")
+                    maxLabel.Size = UDim2.new(0,80,1,0)
+                    maxLabel.Position = UDim2.new(0,430,0,0)
+                    maxLabel.BackgroundTransparency = 1
+                    maxLabel.Text = "(max:2000m)"
+                    maxLabel.TextColor3 = Color3.fromRGB(200,200,200)
+                    maxLabel.TextScaled = true
+                    maxLabel.TextXAlignment = Enum.TextXAlignment.Left
+                    maxLabel.Parent = row
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(FlyTP.SearchRange / 2000,0,1,0)
+    fill.BackgroundColor3 = Color3.fromRGB(0,200,255)
+    fill.Parent = slider
+
+    local MAX = 2000
+    local dragging = false
+
+    slider.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
+    end)
+    slider.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    slider.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+            local x = math.clamp(i.Position.X - slider.AbsolutePosition.X,0,slider.AbsoluteSize.X)
+            local val = math.floor((x / slider.AbsoluteSize.X) * MAX)
+            FlyTP.SearchRange = val
+            inputBox.Text = tostring(val)
+            fill.Size = UDim2.new(x / slider.AbsoluteSize.X,0,1,0)
+        end
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "拉怪範圍:", function(row)
+    local inputBox = Instance.new("TextBox")
+    inputBox.Size = UDim2.new(0,80,0.6,0)
+    inputBox.Position = UDim2.new(0,130,0.2,0)
+    inputBox.BackgroundColor3 = Color3.fromRGB(70,70,70)
+    inputBox.TextColor3 = Color3.fromRGB(255,255,255)
+    inputBox.TextScaled = true
+    inputBox.ClearTextOnFocus = false
+    inputBox.Text = tostring(BringNPC.PullRange)
+    inputBox.Parent = row
+
+    local slider = Instance.new("Frame")
+    slider.Size = UDim2.new(0,200,0.3,0)
+    slider.Position = UDim2.new(0,220,0.35,0)
+    slider.BackgroundColor3 = Color3.fromRGB(100,100,100)
+    slider.Parent = row
+
+                    local maxLabel = Instance.new("TextLabel")
+                    maxLabel.Size = UDim2.new(0,80,1,0)
+                    maxLabel.Position = UDim2.new(0,430,0,0)
+                    maxLabel.BackgroundTransparency = 1
+                    maxLabel.Text = "(max:250m)"
+                    maxLabel.TextColor3 = Color3.fromRGB(200,200,200)
+                    maxLabel.TextScaled = true
+                    maxLabel.TextXAlignment = Enum.TextXAlignment.Left
+                    maxLabel.Parent = row
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(BringNPC.PullRange / 250,0,1,0)
+    fill.BackgroundColor3 = Color3.fromRGB(255,80,80)
+    fill.Parent = slider
+
+    local MAX = 250
+    local dragging = false
+
+    slider.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
+    end)
+    slider.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    slider.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+            local x = math.clamp(i.Position.X - slider.AbsolutePosition.X,0,slider.AbsoluteSize.X)
+            local val = math.floor((x / slider.AbsoluteSize.X) * MAX)
+            BringNPC.PullRange = val
+            inputBox.Text = tostring(val)
+            fill.Size = UDim2.new(x / slider.AbsoluteSize.X,0,1,0)
+        end
+    end)
+end)
+
+y = y + 60
+
+         -- ===== 彩虹大標題 =====
+local mainTitle = Instance.new("TextLabel")
+mainTitle.Size = UDim2.new(1,-20,0,60)
+mainTitle.Position = UDim2.new(0,10,0,y)
+mainTitle.BackgroundTransparency = 1
+mainTitle.Text = "Dungeon"
+mainTitle.Font = Enum.Font.SourceSansBold
+mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+mainTitle.TextSize = 40      -- ★★★ 在這裡改字大小 ★★★
+mainTitle.Parent = contentFrame
+
+-- 彩虹效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+y = y + 60 -- 下一個選項的 y 位置
+
+createOptionRow(contentFrame, y, "Auto Teleport", function(row)
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0, 60, 0.5, 0)
+    switchBg.Position = UDim2.new(1, -70, 0.25, 0)
+    switchBg.BackgroundColor3 = AutoTeleportEnabled and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0, 20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 28, 1, 0)
+    knob.Position = AutoTeleportEnabled and UDim2.new(1, -28, 0, 0) or UDim2.new(0, 0, 0, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0, 20)
+
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1,0,1,0)
+    button.BackgroundTransparency = 1
+    button.Text = ""
+    button.Parent = switchBg
+
+    button.MouseButton1Click:Connect(function()
+        AutoTeleportEnabled = not AutoTeleportEnabled
+
+        switchBg.BackgroundColor3 = AutoTeleportEnabled and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)
+        knob:TweenPosition(AutoTeleportEnabled and UDim2.new(1,-28,0,0) or UDim2.new(0,0,0,0), "Out", "Quad", 0.15, true)
+
+        -- 開關打開時立即嘗試傳送
+        if AutoTeleportEnabled and getCharacterParts() and canTeleport() then
+            local exit = getClosestExit()
+            if exit then
+                teleportToExit(exit)
+            end
+        end
+    end)
+end)
+
+y = y + 60 -- 下一個選項的 y 位置
+
+         -- ===== 彩虹大標題 =====
+local mainTitle = Instance.new("TextLabel")
+mainTitle.Size = UDim2.new(1,-20,0,60)
+mainTitle.Position = UDim2.new(0,10,0,y)
+mainTitle.BackgroundTransparency = 1
+mainTitle.Text = "船隻速度"
+mainTitle.Font = Enum.Font.SourceSansBold
+mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+mainTitle.TextSize = 40      -- ★★★ 在這裡改字大小 ★★★
+mainTitle.Parent = contentFrame
+
+-- 彩虹效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+y = y + 60 -- 下一個選項的 y 位置
+
+createOptionRow(contentFrame, y, "船隻加速", function(row)
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0,60,0.5,0)
+    switchBg.Position = UDim2.new(1,-70,0.25,0)
+    switchBg.BackgroundColor3 = BoatSpeedSettings.Enabled and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0,20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0,28,1,0)
+    knob.Position = BoatSpeedSettings.Enabled and UDim2.new(1,-28,0,0) or UDim2.new(0,0,0,0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0,20)
+
+    local function toggle()
+        BoatSpeedSettings.Enabled = not BoatSpeedSettings.Enabled
+
+        TweenService:Create(
+            switchBg,
+            TweenInfo.new(0.2),
+            {BackgroundColor3 = BoatSpeedSettings.Enabled and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)}
+        ):Play()
+
+        TweenService:Create(
+            knob,
+            TweenInfo.new(0.2),
+            {Position = BoatSpeedSettings.Enabled and UDim2.new(1,-28,0,0) or UDim2.new(0,0,0,0)}
+        ):Play()
+
+        updateBoatSpeed()
+    end
+
+    switchBg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            toggle()
+        end
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "速度調整", function(row)
+    local inputBox = Instance.new("TextBox")
+    inputBox.Size = UDim2.new(0,80,0.6,0)
+    inputBox.Position = UDim2.new(0,130,0.2,0)
+    inputBox.BackgroundColor3 = Color3.fromRGB(70,70,70)
+    inputBox.TextColor3 = Color3.fromRGB(255,255,255)
+    inputBox.TextScaled = true
+    inputBox.ClearTextOnFocus = false
+    inputBox.Text = tostring(BoatSpeedSettings.Speed)
+    inputBox.Parent = row
+
+    local slider = Instance.new("Frame")
+    slider.Size = UDim2.new(0,200,0.3,0)
+    slider.Position = UDim2.new(0,220,0.35,0)
+    slider.BackgroundColor3 = Color3.fromRGB(100,100,100)
+    slider.Parent = row
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(BoatSpeedSettings.Speed / BoatSpeedSettings.MaxSpeed,0,1,0)
+    fill.BackgroundColor3 = Color3.fromRGB(0,170,255)
+    fill.Parent = slider
+
+    local maxLabel = Instance.new("TextLabel")
+    maxLabel.Size = UDim2.new(0,80,1,0)
+    maxLabel.Position = UDim2.new(0,430,0,0)
+    maxLabel.BackgroundTransparency = 1
+    maxLabel.Text = "(max:500)"
+    maxLabel.TextColor3 = Color3.fromRGB(200,200,200)
+    maxLabel.TextScaled = true
+    maxLabel.TextXAlignment = Enum.TextXAlignment.Left
+    maxLabel.Parent = row
+
+    local dragging = false
+    slider.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+        end
+    end)
+    slider.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+
+    slider.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local x = math.clamp(input.Position.X - slider.AbsolutePosition.X, 0, slider.AbsoluteSize.X)
+            BoatSpeedSettings.Speed = math.floor((x / slider.AbsoluteSize.X) * BoatSpeedSettings.MaxSpeed)
+            fill.Size = UDim2.new(BoatSpeedSettings.Speed / BoatSpeedSettings.MaxSpeed,0,1,0)
+            inputBox.Text = tostring(BoatSpeedSettings.Speed)
+            updateBoatSpeed()
+        end
+    end)
+
+    inputBox.FocusLost:Connect(function()
+        local val = tonumber(inputBox.Text)
+        if val then
+            BoatSpeedSettings.Speed = math.clamp(val, 0, BoatSpeedSettings.MaxSpeed)
+            fill.Size = UDim2.new(BoatSpeedSettings.Speed / BoatSpeedSettings.MaxSpeed,0,1,0)
+            updateBoatSpeed()
+        else
+            inputBox.Text = tostring(BoatSpeedSettings.Speed)
+        end
+    end)
+end)
+
+y = y + 60
+
+            elseif index == 7 then
+                    local y = 10
+-- ===== 彩虹大標題 =====
+local mainTitle = Instance.new("TextLabel")
+mainTitle.Size = UDim2.new(1,-20,0,60)
+mainTitle.Position = UDim2.new(0,10,0,y)
+mainTitle.BackgroundTransparency = 1
+mainTitle.Text = "提高FPS"
+mainTitle.Font = Enum.Font.SourceSansBold
+mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+mainTitle.TextSize = 40      -- ★★★ 在這裡改字大小 ★★★
+mainTitle.Parent = contentFrame
+
+-- 彩虹效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+y = y + 60 -- 下一個選項的 y 位置
+
+createOptionRow(contentFrame, y, "低配模式", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0) 
+    button.Position = UDim2.new(1, -70, 0.15, 0) 
+    button.BackgroundTransparency = 1 
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255, 255, 255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local clicked = false
+
+    button.MouseButton1Click:Connect(function()
+        if clicked then return end
+        clicked = true
+        local tweenService = game:GetService("TweenService")
+        local shrinkInfo = TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        local shrinkGoal = {Size = UDim2.new(0, 30, 0.7, 0)}
+        local growGoal = {Size = UDim2.new(0, 40, 0.7, 0)}
+        local shrinkTween = tweenService:Create(button, shrinkInfo, shrinkGoal)
+        local growTween = tweenService:Create(button, shrinkInfo, growGoal)
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function()
+            growTween:Play()
+        end)
+        local flashInfo = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        local flashGoal = {TextColor3 = Color3.fromRGB(255, 255, 0)}
+        local restoreGoal = {TextColor3 = Color3.fromRGB(255, 255, 255)}
+        local flashTween = tweenService:Create(button, flashInfo, flashGoal)
+        local restoreTween = tweenService:Create(button, flashInfo, restoreGoal)
+        flashTween:Play()
+        flashTween.Completed:Connect(function()
+            restoreTween:Play()
+        end)
+        button.TextColor3 = Color3.fromRGB(150, 150, 150)
+        button.TextTransparency = 0.5
+        task.delay(1, function()
+            ApplyLowGraphics(true)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "Remove Fog", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255, 255, 255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local clicked = false
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        if clicked then return end
+        clicked = true
+
+        -- 縮放動畫
+        local tweenInfo = TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        local shrinkTween = tweenService:Create(button, tweenInfo, {
+            Size = UDim2.new(0, 30, 0.7, 0)
+        })
+        local growTween = tweenService:Create(button, tweenInfo, {
+            Size = UDim2.new(0, 40, 0.7, 0)
+        })
+
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function()
+            growTween:Play()
+        end)
+
+        -- 閃光效果
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {
+            TextColor3 = Color3.fromRGB(255, 255, 0)
+        })
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {
+            TextColor3 = Color3.fromRGB(255, 255, 255)
+        })
+
+        flashTween:Play()
+        flashTween.Completed:Connect(function()
+            restoreTween:Play()
+        end)
+
+        -- 按過後的狀態
+        button.TextColor3 = Color3.fromRGB(150, 150, 150)
+        button.TextTransparency = 0.5
+
+        -- 執行功能（延遲一點更順）
+        task.delay(0.2, function()
+            RemoveFog()
+        end)
+    end)
+end)
+
+y = y + 60
+
+         -- ===== 彩虹大標題 =====
+local mainTitle = Instance.new("TextLabel")
+mainTitle.Size = UDim2.new(1,-20,0,60)
+mainTitle.Position = UDim2.new(0,10,0,y)
+mainTitle.BackgroundTransparency = 1
+mainTitle.Text = "遊戲內"
+mainTitle.Font = Enum.Font.SourceSansBold
+mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+mainTitle.TextSize = 40      -- ★★★ 在這裡改字大小 ★★★
+mainTitle.Parent = contentFrame
+
+-- 彩虹效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+y = y + 60 -- 下一個選項的 y 位置
+
+-- ================= Anti AFK Button =================
+createOptionRow(contentFrame, y, "Anti AFK", function(row)
+
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0, 60, 0.5, 0)
+    switchBg.Position = UDim2.new(1, -70, 0.25, 0)
+    switchBg.BackgroundColor3 = AntiAFK_ENABLED 
+        and Color3.fromRGB(0, 200, 0) 
+        or Color3.fromRGB(100, 100, 100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0, 20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 28, 1, 0)
+    knob.Position = AntiAFK_ENABLED 
+        and UDim2.new(1, -28, 0, 0) 
+        or UDim2.new(0, 0, 0, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0, 20)
+
+    -- 點擊切換
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1, 0, 1, 0)
+    button.BackgroundTransparency = 1
+    button.Text = ""
+    button.Parent = switchBg
+
+    button.MouseButton1Click:Connect(function()
+        AntiAFK_ENABLED = not AntiAFK_ENABLED
+
+        if AntiAFK_ENABLED then
+            enableAntiAFK()
+        else
+            disableAntiAFK()
+        end
+
+        -- 視覺更新
+        switchBg.BackgroundColor3 = AntiAFK_ENABLED
+            and Color3.fromRGB(0, 200, 0)
+            or Color3.fromRGB(100, 100, 100)
+
+        knob:TweenPosition(
+            AntiAFK_ENABLED and UDim2.new(1, -28, 0, 0) or UDim2.new(0, 0, 0, 0),
+            Enum.EasingDirection.Out,
+            Enum.EasingStyle.Quad,
+            0.15,
+            true
+        )
+    end)
+end)
+
+        y = y + 60
+
+createOptionRow(contentFrame, y, "移動速度", function(row)
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0,60,0.5,0)
+    switchBg.Position = UDim2.new(1,-70,0.25,0)
+    switchBg.BackgroundColor3 = enabled and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0,20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0,28,1,0)
+    knob.Position = enabled and UDim2.new(1,-28,0,0) or UDim2.new(0,0,0,0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0,20)
+
+    local function toggle()
+        enabled = not enabled
+        toggleMove(enabled)
+        if enabled then
+            knob:TweenPosition(UDim2.new(1,-28,0,0),"Out","Quad",0.2,true)
+            switchBg.BackgroundColor3 = Color3.fromRGB(0,200,0)
+        else
+            knob:TweenPosition(UDim2.new(0,0,0,0),"Out","Quad",0.2,true)
+            switchBg.BackgroundColor3 = Color3.fromRGB(100,100,100)
+        end
+    end
+
+    switchBg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then toggle() end
+    end)
+end)
+
+y += 60
+
+-- 速度調整
+createOptionRow(contentFrame, y, "速度調整:", function(row)
+    local inputBox = Instance.new("TextBox")
+    inputBox.Size = UDim2.new(0,80,0.6,0)
+    inputBox.Position = UDim2.new(0,130,0.2,0)
+    inputBox.BackgroundColor3 = Color3.fromRGB(70,70,70)
+    inputBox.TextColor3 = Color3.fromRGB(255,255,255)
+    inputBox.TextScaled = true
+    inputBox.ClearTextOnFocus = false
+    inputBox.Text = tostring(SLIDE_MAGNITUDE)
+    inputBox.Parent = row
+
+    local slider = Instance.new("Frame")
+    slider.Size = UDim2.new(0,200,0.3,0)
+    slider.Position = UDim2.new(0,220,0.35,0)
+    slider.BackgroundColor3 = Color3.fromRGB(100,100,100)
+    slider.Parent = row
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(SLIDE_MAGNITUDE/MAX_SPEED,0,1,0)
+    fill.BackgroundColor3 = Color3.fromRGB(0,200,255)
+    fill.Parent = slider
+
+                    local maxLabel = Instance.new("TextLabel")
+                    maxLabel.Size = UDim2.new(0,80,1,0)
+                    maxLabel.Position = UDim2.new(0,430,0,0)
+                    maxLabel.BackgroundTransparency = 1
+                    maxLabel.Text = "(max:1000)"
+                    maxLabel.TextColor3 = Color3.fromRGB(200,200,200)
+                    maxLabel.TextScaled = true
+                    maxLabel.TextXAlignment = Enum.TextXAlignment.Left
+                    maxLabel.Parent = row
+
+    local dragging = false
+
+    slider.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
+    end)
+    slider.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    slider.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local mouseX = input.Position.X - slider.AbsolutePosition.X
+            mouseX = math.clamp(mouseX,0,slider.AbsoluteSize.X)
+            local speed = (mouseX/slider.AbsoluteSize.X)*MAX_SPEED
+            SLIDE_MAGNITUDE = speed
+            inputBox.Text = tostring(math.floor(speed))
+            fill.Size = UDim2.new(mouseX/slider.AbsoluteSize.X,0,1,0)
+        end
+    end)
+
+    inputBox.FocusLost:Connect(function(enterPressed)
+        if enterPressed then
+            local val = tonumber(inputBox.Text)
+            if val then
+                SLIDE_MAGNITUDE = math.clamp(val,0,MAX_SPEED)
+                inputBox.Text = tostring(math.floor(SLIDE_MAGNITUDE))
+                fill.Size = UDim2.new(SLIDE_MAGNITUDE/MAX_SPEED,0,1,0)
+            else
+                inputBox.Text = tostring(math.floor(SLIDE_MAGNITUDE))
+            end
+        end
+    end)
+end)
+
+ y = y + 60
+
+-- ================= 跳躍開關 (帶滑動動畫) =================
+createOptionRow(contentFrame, y, "跳躍開關", function(row)
+    local switchBg = Instance.new("Frame")
+    switchBg.Size = UDim2.new(0,60,0.5,0)
+    switchBg.Position = UDim2.new(1,-70,0.25,0)
+    switchBg.BackgroundColor3 = JumpSettings.Enabled and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)
+    switchBg.BorderSizePixel = 0
+    switchBg.Parent = row
+    Instance.new("UICorner", switchBg).CornerRadius = UDim.new(0,20)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0,28,1,0)
+    knob.Position = JumpSettings.Enabled and UDim2.new(1,-28,0,0) or UDim2.new(0,0,0,0)
+    knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    knob.BorderSizePixel = 0
+    knob.Parent = switchBg
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0,20)
+
+    local TweenService = game:GetService("TweenService")
+    
+    local function toggleSwitch()
+        JumpSettings.Enabled = not JumpSettings.Enabled
+
+        -- 背景顏色動畫
+        local bgTween = TweenService:Create(switchBg, TweenInfo.new(0.2), {BackgroundColor3 = JumpSettings.Enabled and Color3.fromRGB(0,200,0) or Color3.fromRGB(100,100,100)})
+        bgTween:Play()
+
+        -- knob 滑動動畫
+        local knobTween = TweenService:Create(knob, TweenInfo.new(0.2), {Position = JumpSettings.Enabled and UDim2.new(1,-28,0,0) or UDim2.new(0,0,0,0)})
+        knobTween:Play()
+
+        -- 更新跳躍
+        updateJumpPower(game.Players.LocalPlayer)
+    end
+
+    -- 點擊切換
+    switchBg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            toggleSwitch()
+        end
+    end)
+end)
+
+y = y + 60
+
+-- 滑桿控制跳躍高度
+createOptionRow(contentFrame, y, "跳躍高度", function(row)
+    local inputBox = Instance.new("TextBox")
+    inputBox.Size = UDim2.new(0,80,0.6,0)
+    inputBox.Position = UDim2.new(0,130,0.2,0)
+    inputBox.BackgroundColor3 = Color3.fromRGB(70,70,70)
+    inputBox.TextColor3 = Color3.fromRGB(255,255,255)
+    inputBox.TextScaled = true
+    inputBox.ClearTextOnFocus = false
+    inputBox.Text = tostring(JumpSettings.JumpPower)
+    inputBox.Parent = row
+
+    local slider = Instance.new("Frame")
+    slider.Size = UDim2.new(0,200,0.3,0)
+    slider.Position = UDim2.new(0,220,0.35,0)
+    slider.BackgroundColor3 = Color3.fromRGB(100,100,100)
+    slider.Parent = row
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(JumpSettings.JumpPower/JumpSettings.MaxJumpPower,0,1,0)
+    fill.BackgroundColor3 = Color3.fromRGB(255,200,0)
+    fill.Parent = slider
+
+    local maxLabel = Instance.new("TextLabel")
+    maxLabel.Size = UDim2.new(0,80,1,0)
+    maxLabel.Position = UDim2.new(0,430,0,0)
+    maxLabel.BackgroundTransparency = 1
+    maxLabel.Text = "(max:500)"
+    maxLabel.TextColor3 = Color3.fromRGB(200,200,200)
+    maxLabel.TextScaled = true
+    maxLabel.TextXAlignment = Enum.TextXAlignment.Left
+    maxLabel.Parent = row
+
+    -- 滑桿拖曳
+    local dragging = false
+    slider.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+        end
+    end)
+    slider.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+    slider.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local relativeX = math.clamp(input.Position.X - slider.AbsolutePosition.X, 0, slider.AbsoluteSize.X)
+            JumpSettings.JumpPower = math.floor((relativeX / slider.AbsoluteSize.X) * JumpSettings.MaxJumpPower)
+            fill.Size = UDim2.new(JumpSettings.JumpPower/JumpSettings.MaxJumpPower,0,1,0)
+            inputBox.Text = tostring(JumpSettings.JumpPower)
+            updateJumpPower(game.Players.LocalPlayer)
+        end
+    end)
+    -- 文字框直接輸入
+    inputBox.FocusLost:Connect(function()
+        local val = tonumber(inputBox.Text)
+        if val then
+            JumpSettings.JumpPower = math.clamp(val,0,JumpSettings.MaxJumpPower)
+            fill.Size = UDim2.new(JumpSettings.JumpPower/JumpSettings.MaxJumpPower,0,1,0)
+            updateJumpPower(game.Players.LocalPlayer)
+        else
+            inputBox.Text = tostring(JumpSettings.JumpPower)
+        end
+    end)
+end)
+
+y = y + 60
+
+            elseif index == 8 then
+                    local y = 10
+
+if World1 then
+-- ===== 彩虹大標題 =====
+local mainTitle = Instance.new("TextLabel")
+mainTitle.Size = UDim2.new(1,-20,0,60)
+mainTitle.Position = UDim2.new(0,10,0,y)
+mainTitle.BackgroundTransparency = 1
+mainTitle.Text = "一海"
+mainTitle.Font = Enum.Font.SourceSansBold
+mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+mainTitle.TextSize = 40      -- ★★★ 在這裡改字大小 ★★★
+mainTitle.Parent = contentFrame
+
+-- 彩虹效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+y = y + 60 -- 下一個選項的 y 位置
+
+createOptionRow(contentFrame, y, "停止飛行", function(row) 
+    -- 將 row 的文字改成紅色
+    if row:FindFirstChild("TextLabel") then
+        row.TextLabel.TextColor3 = Color3.fromRGB(255, 0, 0)
+    elseif row:IsA("TextLabel") or row:IsA("TextButton") then
+        row.TextColor3 = Color3.fromRGB(255, 0, 0)
+    end
+
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 按鈕動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        -- 停止飛行與 noclip
+        DisableFlyAndNoclip()
+    end)
+end)
+
+y = y + 60 -- 下一個按鈕
+
+createOptionRow(contentFrame, y, "海軍戰艦", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        -- 呼叫 SmartTeleport 到座標A
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[1].Intermediate, TeleportTargets[1].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "新手村", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[2].Intermediate, TeleportTargets[2].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "叢林", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[3].Intermediate, TeleportTargets[3].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "海盜村", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[4].Intermediate, TeleportTargets[4].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "中城", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[5].Intermediate, TeleportTargets[5].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "可樂", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[6].Intermediate, TeleportTargets[6].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "水下", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[7].Intermediate, TeleportTargets[7].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "噴泉", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[8].Intermediate, TeleportTargets[8].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "上空島", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[9].Intermediate, TeleportTargets[9].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "空島", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[10].Intermediate, TeleportTargets[10].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "沙漠", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[11].Intermediate, TeleportTargets[11].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "火山", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[12].Intermediate, TeleportTargets[12].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "監獄", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[13].Intermediate, TeleportTargets[13].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "海洋堡壘", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[14].Intermediate, TeleportTargets[14].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "雪地", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[15].Intermediate, TeleportTargets[15].Target)
+        end)
+    end)
+end)
+
+y = y + 60
+
+createOptionRow(contentFrame, y, "暴徒領地", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        -- 閃爍動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        task.spawn(function()
+            SmartTeleport(TeleportTargets[16].Intermediate, TeleportTargets[16].Target)
+        end)
+    end)
+end)
+end
+
+if World2 then
+    local y = 10 -- 每個世界的起點
+
+    -- ===== 彩虹大標題 =====
+    local mainTitle = Instance.new("TextLabel")
+    mainTitle.Size = UDim2.new(1,-20,0,60)
+    mainTitle.Position = UDim2.new(0,10,0,y)
+    mainTitle.BackgroundTransparency = 1
+    mainTitle.Text = "二海"
+    mainTitle.Font = Enum.Font.SourceSansBold
+    mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+    mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+    mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+    mainTitle.TextSize = 40
+    mainTitle.Parent = contentFrame
+
+    -- 彩虹效果
+    local hue = 0
+    RunService.RenderStepped:Connect(function(dt)
+        hue = (hue + dt/2) % 1
+        mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+    end)
+
+    y = y + 60 -- 下一個按鈕位置
+
+createOptionRow(contentFrame, y, "停止飛行", function(row) 
+    -- 將 row 的文字改成紅色
+    if row:FindFirstChild("TextLabel") then
+        row.TextLabel.TextColor3 = Color3.fromRGB(255, 0, 0)
+    elseif row:IsA("TextLabel") or row:IsA("TextButton") then
+        row.TextColor3 = Color3.fromRGB(255, 0, 0)
+    end
+
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 按鈕動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        -- 停止飛行與 noclip
+        DisableFlyAndNoclip()
+    end)
+end)
+
+y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "碼頭2", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[17].Intermediate, TeleportTargets[17].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "鬼船", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[18].Intermediate, TeleportTargets[18].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "墓地", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[19].Intermediate, TeleportTargets[19].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "咖啡廳", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[20].Intermediate, TeleportTargets[20].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "黑暗競技場(如果有黑暗之權會立刻召喚)", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[21].Intermediate, TeleportTargets[21].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "骷髏島", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[22].Intermediate, TeleportTargets[22].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "狗屋", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[23].Intermediate, TeleportTargets[23].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "岩漿", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[24].Intermediate, TeleportTargets[24].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "Raid", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[25].Intermediate, TeleportTargets[25].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "雪地", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[26].Intermediate, TeleportTargets[26].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "可樂", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[27].Intermediate, TeleportTargets[27].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "實驗室", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[28].Intermediate, TeleportTargets[28].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "豪宅", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[29].Intermediate, TeleportTargets[29].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "碼頭4", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[30].Intermediate, TeleportTargets[30].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "遠程", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[31].Intermediate, TeleportTargets[31].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "碼頭1", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[32].Intermediate, TeleportTargets[32].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "冬季城堡", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[33].Intermediate, TeleportTargets[33].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "碼頭3", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[34].Intermediate, TeleportTargets[34].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "工廠", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[35].Intermediate, TeleportTargets[35].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "未知", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[36].Intermediate, TeleportTargets[36].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+end
+
+if World3 then
+    local y = 10 -- 每個世界的起點
+
+    -- ===== 彩虹大標題 =====
+    local mainTitle = Instance.new("TextLabel")
+    mainTitle.Size = UDim2.new(1,-20,0,60)
+    mainTitle.Position = UDim2.new(0,10,0,y)
+    mainTitle.BackgroundTransparency = 1
+    mainTitle.Text = "三海"
+    mainTitle.Font = Enum.Font.SourceSansBold
+    mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+    mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+    mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+    mainTitle.TextSize = 40
+    mainTitle.Parent = contentFrame
+
+    -- 彩虹效果
+    local hue = 0
+    RunService.RenderStepped:Connect(function(dt)
+        hue = (hue + dt/2) % 1
+        mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+    end)
+
+    y = y + 60 -- 下一個按鈕位置
+
+createOptionRow(contentFrame, y, "停止飛行", function(row) 
+    -- 將 row 的文字改成紅色
+    if row:FindFirstChild("TextLabel") then
+        row.TextLabel.TextColor3 = Color3.fromRGB(255, 0, 0)
+    elseif row:IsA("TextLabel") or row:IsA("TextButton") then
+        row.TextColor3 = Color3.fromRGB(255, 0, 0)
+    end
+
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 按鈕動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+        -- 停止飛行與 noclip
+        DisableFlyAndNoclip()
+    end)
+end)
+
+y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "港口", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[37].Intermediate, TeleportTargets[37].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "烏龜屋", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[38].Intermediate, TeleportTargets[38].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "海上城堡", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[39].Intermediate, TeleportTargets[39].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "大媽島", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[40].Intermediate, TeleportTargets[40].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "海德拉", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[41].Intermediate, TeleportTargets[41].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "司法島", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[42].Intermediate, TeleportTargets[42].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "烏龜中心", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[43].Intermediate, TeleportTargets[43].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "大樹", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[44].Intermediate, TeleportTargets[44].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "烏龜山", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[45].Intermediate, TeleportTargets[45].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "鬧鬼城堡", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[46].Intermediate, TeleportTargets[46].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "花生島", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[47].Intermediate, TeleportTargets[47].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "烏龜入口", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[48].Intermediate, TeleportTargets[48].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "海德拉競技場", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[49].Intermediate, TeleportTargets[49].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "可可島", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[50].Intermediate, TeleportTargets[50].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+    createOptionRow(contentFrame, y, "蛋糕島", function(row)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 40, 0.7, 0)
+        button.Position = UDim2.new(1, -70, 0.15, 0)
+        button.BackgroundTransparency = 1
+        button.Text = "◉"
+        button.TextScaled = true
+        button.TextColor3 = Color3.fromRGB(255,255,255)
+        button.Font = Enum.Font.SourceSansBold
+        button.Parent = row
+
+        local tweenService = game:GetService("TweenService")
+
+        button.MouseButton1Click:Connect(function()
+            local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+            local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+            shrinkTween:Play()
+            shrinkTween.Completed:Connect(function() growTween:Play() end)
+
+            local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+            local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+            flashTween:Play()
+            flashTween.Completed:Connect(function() restoreTween:Play() end)
+
+            task.spawn(function()
+                SmartTeleport(TeleportTargets[51].Intermediate, TeleportTargets[51].Target)
+            end)
+        end)
+    end)
+
+    y = y + 60 -- 下一個按鈕
+
+end
+            elseif index == 9 then
+                    local y = 10
+-- ===== 彩虹大標題 =====
+local mainTitle = Instance.new("TextLabel")
+mainTitle.Size = UDim2.new(1,-20,0,60)
+mainTitle.Position = UDim2.new(0,10,0,y)
+mainTitle.BackgroundTransparency = 1
+mainTitle.Text = "娛樂"
+mainTitle.Font = Enum.Font.SourceSansBold
+mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+mainTitle.TextSize = 40      -- ★★★ 在這裡改字大小 ★★★
+mainTitle.Parent = contentFrame
+
+-- 彩虹效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+y = y + 60 -- 下一個選項的 y 位置
+
+            elseif index == 10 then
+                    local y = 10
+-- ===== 彩虹大標題 =====
+local mainTitle = Instance.new("TextLabel")
+mainTitle.Size = UDim2.new(1,-20,0,60)
+mainTitle.Position = UDim2.new(0,10,0,y)
+mainTitle.BackgroundTransparency = 1
+mainTitle.Text = "其他"
+mainTitle.Font = Enum.Font.SourceSansBold
+mainTitle.TextColor3 = Color3.fromRGB(255,255,255)
+mainTitle.TextXAlignment = Enum.TextXAlignment.Center
+mainTitle.TextYAlignment = Enum.TextYAlignment.Center
+mainTitle.TextSize = 40      -- ★★★ 在這裡改字大小 ★★★
+mainTitle.Parent = contentFrame
+
+-- 彩虹效果
+local hue = 0
+RunService.RenderStepped:Connect(function(dt)
+    hue = (hue + dt/2) % 1
+    mainTitle.TextColor3 = Color3.fromHSV(hue,1,1)
+end)
+
+y = y + 60 -- 下一個選項的 y 位置
+
+-- ===== MangoJuice Hub =====
+createOptionRow(contentFrame, y, "MangoJuice Hub", function(row)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 40, 0.7, 0)
+    button.Position = UDim2.new(1, -70, 0.15, 0)
+    button.BackgroundTransparency = 1
+    button.Text = "◉"
+    button.TextScaled = true
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = row
+
+    local tweenService = game:GetService("TweenService")
+
+    button.MouseButton1Click:Connect(function()
+        -- 按鈕縮放動畫
+        local shrinkTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,30,0.7,0)})
+        local growTween = tweenService:Create(button, TweenInfo.new(0.1), {Size=UDim2.new(0,40,0.7,0)})
+        shrinkTween:Play()
+        shrinkTween.Completed:Connect(function() 
+            growTween:Play() 
+        end)
+
+        -- 閃光動畫
+        local flashTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,0)})
+        local restoreTween = tweenService:Create(button, TweenInfo.new(0.15), {TextColor3=Color3.fromRGB(255,255,255)})
+        flashTween:Play()
+        flashTween.Completed:Connect(function() 
+            restoreTween:Play() 
+        end)
+
+        -- 執行腳本
+        task.spawn(function()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/mangojuice52042-star/MangoJuice-Hub/refs/heads/main/MangoJuice%20Hub%20Update"))()
+        end)
+    end)
+end)
+
+y = y + 60
+
+            end
+        end
+
+local currentPage = nil -- 記錄目前頁面
+
+-- 點擊側欄按鈕
+for i, b in ipairs(buttons) do
+    b.Button.MouseButton1Click:Connect(function()
+        showContent(i)
+        currentPage = i
+    end)
+end
+
+-- 開關 Xu-hub
+toggleBtn.MouseButton1Click:Connect(function()
+    mainFrame.Visible = not mainFrame.Visible
+
+    if mainFrame.Visible then
+
+        if not currentPage then
+            showContent(1)
+            currentPage = 1
+        else
+
+            showContent(currentPage)
+        end
+    end
+end)
+
+        -- ===== 可拖動功能 =====
+        local dragging = false
+        local dragInput
+        local dragStart
+        local startPos
+
+        local function update(input)
+            local delta = input.Position - dragStart
+            mainFrame.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+
+        titleBar.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = true
+                dragStart = input.Position
+                startPos = mainFrame.Position
+
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then
+                        dragging = false
+                    end
+                end)
+            end
+        end)
+
+        titleBar.InputChanged:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseMovement then
+                dragInput = input
+            end
+        end)
+
+        UserInputService.InputChanged:Connect(function(input)
+            if input == dragInput and dragging then
+                update(input)
+            end
+        end)
+
+        -- ===== FastAttack 核心執行 =====
+        task.spawn(function()
+            while _G.FastAttack do
+                if Settings.AutoClick then
+                    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                    if root then
+                        local targets = {}
+                        for _, folder in ipairs({EnemiesFolder, CharactersFolder}) do
+                            for _, obj in ipairs(folder:GetChildren()) do
+                                if obj ~= player.Character then
+                                    local head = obj:FindFirstChild("Head")
+                                    if head and IsAlive(obj) then
+                                        local dist = (head.Position - root.Position).Magnitude
+                                        if dist <= Settings.Distance then
+                                            table.insert(targets,{obj,head})
+                                            if #targets >= Settings.MaxTargets then break end
+                                        end
+                                    end
+                                end
+                                if #targets >= Settings.MaxTargets then break end
+                            end
+                            if #targets >= Settings.MaxTargets then break end
+                        end
+
+                        local aliveTargets = {}
+                        for _, t in ipairs(targets) do
+                            if IsAlive(t[1]) then
+                                table.insert(aliveTargets, t)
+                            end
+                        end
+
+                        if #aliveTargets > 0 then
+                            RegisterAttack:FireServer(0)
+                            RegisterHit:FireServer(aliveTargets[1][2], aliveTargets)
+                        end
+                    end
+                end
+                task.wait(Settings.AttackInterval)
+            end
+        end)

@@ -1,0 +1,331 @@
+-- 地牢自動找出口傳送 (帶簡單可拖動UI)
+-- 原邏輯保持不變，只增加UI控制
+
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local hrp = character:WaitForChild("HumanoidRootPart")
+local humanoid = character:WaitForChild("Humanoid")
+
+-- ━━━━━━━━━━━━━━━━━━━━━━ 設定 ━━━━━━━━━━━━━━━━━━━━━━
+local CONFIG = {
+    TargetTeleporterName = "ExitTeleporter",
+    CheckInterval = 1,
+    TweenTime = 0.8,
+    EasingStyle = Enum.EasingStyle.Quad,
+    EasingDirection = Enum.EasingDirection.Out,
+    DisableMovement = true,
+    DetectionRadius = 1000,
+    CooldownAfterTeleport = 3
+}
+
+-- ━━━━━━━━━━━━━━━━━━━━━━ 狀態變數 ━━━━━━━━━━━━━━━━━━━━━━
+local isTeleporting = false
+local isAutoDetectEnabled = true
+local lastTeleportTime = 0
+local dragging, dragInput, dragStart, startPos
+
+-- ━━━━━━━━━━━━━━━━━━━━━━ UI 建立 ━━━━━━━━━━━━━━━━━━━━━━
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "DungeonAutoTP"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = player:WaitForChild("PlayerGui")
+
+local Frame = Instance.new("Frame")
+Frame.Size = UDim2.new(0, 220, 0, 180)
+Frame.Position = UDim2.new(0.5, -110, 0.4, -90)
+Frame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+Frame.BorderSizePixel = 0
+Frame.Active = true
+Frame.Draggable = false   -- 我們自己實作拖曳
+Frame.Parent = ScreenGui
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 8)
+UICorner.Parent = Frame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 34)
+Title.BackgroundTransparency = 1
+Title.Text = "地牢自動傳送"
+Title.TextColor3 = Color3.fromRGB(220, 220, 230)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 16
+Title.Parent = Frame
+
+-- 分隔線
+local Line = Instance.new("Frame")
+Line.Size = UDim2.new(1, -20, 0, 1)
+Line.Position = UDim2.new(0, 10, 0, 34)
+Line.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+Line.BorderSizePixel = 0
+Line.Parent = Frame
+
+-- 開關按鈕
+local ToggleButton = Instance.new("TextButton")
+ToggleButton.Name = "ToggleBtn"
+ToggleButton.Size = UDim2.new(0.9, 0, 0, 36)
+ToggleButton.Position = UDim2.new(0.05, 0, 0, 50)
+ToggleButton.BackgroundColor3 = Color3.fromRGB(0, 170, 100)
+ToggleButton.Text = "自動偵測：開啟"
+ToggleButton.TextColor3 = Color3.new(1,1,1)
+ToggleButton.Font = Enum.Font.GothamSemibold
+ToggleButton.TextSize = 15
+ToggleButton.Parent = Frame
+
+local ToggleCorner = Instance.new("UICorner")
+ToggleCorner.CornerRadius = UDim.new(0, 6)
+ToggleCorner.Parent = ToggleButton
+
+-- 狀態文字
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Size = UDim2.new(0.9, 0, 0, 30)
+StatusLabel.Position = UDim2.new(0.05, 0, 0, 95)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Text = "狀態：等待中..."
+StatusLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
+StatusLabel.Font = Enum.Font.Gotham
+StatusLabel.TextSize = 13
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+StatusLabel.Parent = Frame
+
+-- 手動傳送目前層按鈕
+local ManualTPButton = Instance.new("TextButton")
+ManualTPButton.Size = UDim2.new(0.9, 0, 0, 36)
+ManualTPButton.Position = UDim2.new(0.05, 0, 0, 130)
+ManualTPButton.BackgroundColor3 = Color3.fromRGB(80, 80, 200)
+ManualTPButton.Text = "立即傳送到本層出口"
+ManualTPButton.TextColor3 = Color3.new(1,1,1)
+ManualTPButton.Font = Enum.Font.GothamSemibold
+ManualTPButton.TextSize = 14
+ManualTPButton.Parent = Frame
+
+local ManualCorner = Instance.new("UICorner")
+ManualCorner.CornerRadius = UDim.new(0, 6)
+ManualCorner.Parent = ManualTPButton
+
+-- 關閉按鈕 (右上)
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 26, 0, 26)
+CloseBtn.Position = UDim2.new(1, -30, 0, 4)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.new(1,1,1)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 16
+CloseBtn.Parent = Frame
+
+local CloseCorner = Instance.new("UICorner")
+CloseCorner.CornerRadius = UDim.new(0, 6)
+CloseCorner.Parent = CloseBtn
+
+-- ━━━━━━━━━━━━━━━━━━━━━━ 拖曳功能 ━━━━━━━━━━━━━━━━━━━━━━
+local function updateInput(input)
+    local delta = input.Position - dragStart
+    local newPos = UDim2.new(
+        startPos.X.Scale,
+        startPos.X.Offset + delta.X,
+        startPos.Y.Scale,
+        startPos.Y.Offset + delta.Y
+    )
+    Frame.Position = newPos
+end
+
+Title.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = Frame.Position
+        
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+Title.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        updateInput(input)
+    end
+end)
+
+-- 關閉UI
+CloseBtn.MouseButton1Click:Connect(function()
+    ScreenGui:Destroy()
+end)
+
+-- ━━━━━━━━━━━━━━━━━━━━━━ 功能邏輯 ━━━━━━━━━━━━━━━━━━━━━━
+local function updateToggleUI()
+    if isAutoDetectEnabled then
+        ToggleButton.BackgroundColor3 = Color3.fromRGB(0, 170, 100)
+        ToggleButton.Text = "自動偵測：開啟"
+    else
+        ToggleButton.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
+        ToggleButton.Text = "自動偵測：關閉"
+    end
+end
+
+ToggleButton.MouseButton1Click:Connect(function()
+    isAutoDetectEnabled = not isAutoDetectEnabled
+    updateToggleUI()
+end)
+
+local function updateStatus(text)
+    StatusLabel.Text = "狀態： " .. text
+end
+
+local function getAllExitTeleporters()
+    local teleporters = {}
+    local map = workspace:FindFirstChild("Map")
+    if not map then return teleporters end
+    
+    local dungeon = map:FindFirstChild("Dungeon")
+    if not dungeon then return teleporters end
+    
+    for _, level in pairs(dungeon:GetChildren()) do
+        local lvNum = tonumber(level.Name)
+        if lvNum then
+            local tp = level:FindFirstChild(CONFIG.TargetTeleporterName)
+            if tp then
+                local root = tp:FindFirstChild("Root") or tp:FindFirstChildWhichIsA("BasePart")
+                if root then
+                    table.insert(teleporters, {
+                        level = lvNum,
+                        teleporter = tp,
+                        rootPart = root,
+                        position = root.Position
+                    })
+                end
+            end
+        end
+    end
+    
+    table.sort(teleporters, function(a,b) return a.level < b.level end)
+    return teleporters
+end
+
+local function getCurrentLevel()
+    if not hrp then return nil end
+    local pos = hrp.Position
+    local tps = getAllExitTeleporters()
+    local closest, minDist = nil, math.huge
+    
+    for _, info in ipairs(tps) do
+        local dist = (pos - info.position).Magnitude
+        if dist < minDist and dist < CONFIG.DetectionRadius then
+            minDist = dist
+            closest = info.level
+        end
+    end
+    return closest
+end
+
+local function teleportTo(rootPart, level)
+    if isTeleporting then return end
+    
+    local now = tick()
+    if now - lastTeleportTime < CONFIG.CooldownAfterTeleport then
+        return
+    end
+    
+    isTeleporting = true
+    lastTeleportTime = now
+    
+    updateStatus("傳送中 → Lv." .. level)
+    
+    if CONFIG.DisableMovement then
+        humanoid.WalkSpeed = 0
+        humanoid.JumpPower = 0
+    end
+    
+    local tweenInfo = TweenInfo.new(CONFIG.TweenTime, CONFIG.EasingStyle, CONFIG.EasingDirection)
+    local goal = {CFrame = rootPart.CFrame}
+    local tween = TweenService:Create(hrp, tweenInfo, goal)
+    tween:Play()
+    
+    tween.Completed:Connect(function()
+        if CONFIG.DisableMovement then
+            humanoid.WalkSpeed = 16
+            humanoid.JumpPower = 50
+        end
+        task.wait(0.4)
+        isTeleporting = false
+        updateStatus("待機中...")
+    end)
+end
+
+-- 找最近的出口並傳送（無論是否開啟自動）
+local function tryTeleportToNearest()
+    local pos = hrp.Position
+    local tps = getAllExitTeleporters()
+    local best, minDist = nil, math.huge
+    
+    for _, info in ipairs(tps) do
+        local dist = (pos - info.position).Magnitude
+        if dist < minDist then
+            minDist = dist
+            best = info
+        end
+    end
+    
+    if best and minDist < CONFIG.DetectionRadius * 1.5 then
+        teleportTo(best.rootPart, best.level)
+    end
+end
+
+ManualTPButton.MouseButton1Click:Connect(tryTeleportToNearest)
+
+-- 主循環
+task.spawn(function()
+    while true do
+        task.wait(CONFIG.CheckInterval)
+        
+        -- 角色重生/無效檢查
+        if not character or not character.Parent or humanoid.Health <= 0 then
+            character = player.Character or player.CharacterAdded:Wait()
+            hrp = character:WaitForChild("HumanoidRootPart")
+            humanoid = character:WaitForChild("Humanoid")
+            isTeleporting = false
+        end
+        
+        if not isAutoDetectEnabled or isTeleporting then
+            continue
+        end
+        
+        local curLevel = getCurrentLevel()
+        local tps = getAllExitTeleporters()
+        
+        if curLevel then
+            for _, info in ipairs(tps) do
+                if info.level == curLevel then
+                    teleportTo(info.rootPart, curLevel)
+                    break
+                end
+            end
+        end
+    end
+end)
+
+-- 初始化UI狀態
+updateToggleUI()
+updateStatus("初始化完成")
+
+-- 角色重生時更新引用
+player.CharacterAdded:Connect(function(newChar)
+    character = newChar
+    hrp = newChar:WaitForChild("HumanoidRootPart")
+    humanoid = newChar:WaitForChild("Humanoid")
+    isTeleporting = false
+end)
